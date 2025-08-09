@@ -30,7 +30,6 @@ class DatabaseConfig:
     """数据库配置"""
     host: str
     port: int
-    database: str
     username: str
     password: str
 
@@ -39,7 +38,6 @@ class DatabaseConfig:
 class MySQLConfig(DatabaseConfig):
     """MySQL配置"""
     databases: List[str] = field(default_factory=list)
-    ignored_prefixes: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -790,11 +788,9 @@ class MonitorApp(App[None]):
             self.source_config = MySQLConfig(
                 host=mysql_source_section['host'],
                 port=int(mysql_source_section['port']),
-                database="",
                 username=mysql_source_section['username'],
                 password=mysql_source_section['password'],
-                databases=databases_list,
-                ignored_prefixes=[]
+                databases=databases_list
             )
 
             # 目标数据库 MySQL 配置
@@ -802,11 +798,9 @@ class MonitorApp(App[None]):
             self.target_config = MySQLConfig(
                 host=mysql_target_section['host'],
                 port=int(mysql_target_section['port']),
-                database="",
                 username=mysql_target_section['username'],
                 password=mysql_target_section['password'],
-                databases=databases_list,
-                ignored_prefixes=[]
+                databases=databases_list
             )
 
             # 全局配置
@@ -878,9 +872,7 @@ class MonitorApp(App[None]):
                     rows = await cursor.fetchall()
                     for row in rows:
                         table_name = row[0]
-                        if not any(table_name.startswith(prefix.strip())
-                                 for prefix in self.source_config.ignored_prefixes if prefix.strip()):
-                            source_table_names.append(table_name)
+                        source_table_names.append(table_name)
 
                 # 按目标表名分组
                 target_tables = {}
