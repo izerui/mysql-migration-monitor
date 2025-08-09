@@ -25,21 +25,7 @@ from textual.timer import Timer
 from textual.widgets import DataTable, Footer, Header, Static
 
 
-@dataclass
-class MySQLConfig:
-    """数据库配置"""
-    host: str
-    port: int
-    username: str
-    password: str
-    databases: List[str] = field(default_factory=list)
-
-
-@dataclass
-class GlobConfig:
-    """全局配置"""
-    databases: List[str] = field(default_factory=list)
-    refresh_interval: int = 3
+from config_models import MySQLConfig, GlobConfig
 
 
 @dataclass
@@ -290,8 +276,8 @@ class MonitorApp(App[None]):
         super().__init__()
         self.config_file = config_file
         self.override_databases = override_databases
-        self.source_config: Optional[MySQLConfig] = None
-        self.target_config: Optional[MySQLConfig] = None
+        self.source: Optional[MySQLConfig] = None
+        self.target: Optional[MySQLConfig] = None
         self.global_config: Optional[GlobConfig] = None
         self.tables: List[TableInfo] = []
         self.iteration = 0
@@ -304,6 +290,7 @@ class MonitorApp(App[None]):
         self.first_source_update = True
         self.first_target_update = True
         self.source_updating = False
+        self.target_updating = False
 
         # 停止标志，用于优雅退出
         self.stop_event = asyncio.Event()
@@ -364,7 +351,7 @@ class MonitorApp(App[None]):
             return
 
         # 初始化数据库连接测试
-        target_conn = await self.connect_target_mysql(self.global_config.databases[0])
+        target_conn = await self.target.connect(self.global_config.databases[0])
         if not target_conn:
             self.exit(1)
             return
@@ -378,11 +365,19 @@ class MonitorApp(App[None]):
             self.exit(1)
             return
 
-        # 第一次数据更新
-        target_conn = await self.connect_target_mysql(self.global_config.databases[0])
+        # 第一次数据更新 - 使用目标数据库获取表行数
+        target_conn = await self.target.connect(self.global_config.databases[0])
         if target_conn:
-            await self.get_target_mysql_rows_from_information_schema(target_conn, target_tables)
-            target_conn.close()
+            try:
+                for schema_name, tables_dict in target_tables.items():
+                    for table_name, table_info in tables_dict.items():
+                        estimated_rows = await self.target.get_table_rows_from_information_schema(
+                            target_conn, schema_name, table_name
+                        )
+                        table_info.target_rows = max(0, estimated_rows)
+                        table_info.target_last_updated = datetime.now()
+            finally:
+                target_conn.close()
             self.first_target_update = False
 
         self.source_iteration += 1
@@ -774,7 +769,7 @@ class MonitorApp(App[None]):
 
             # 源数据库 MySQL 配置
             mysql_source_section = config['source']
-            self.source_config = MySQLConfig(
+            self.source = MySQLConfig(
                 host=mysql_source_section['host'],
                 port=int(mysql_source_section['port']),
                 username=mysql_source_section['username'],
@@ -783,7 +778,7 @@ class MonitorApp(App[None]):
 
             # 目标数据库 MySQL 配置
             mysql_target_section = config['target']
-            self.target_config = MySQLConfig(
+            self.target = MySQLConfig(
                 host=mysql_target_section['host'],
                 port=int(mysql_target_section['port']),
                 username=mysql_target_section['username'],
@@ -801,38 +796,9 @@ class MonitorApp(App[None]):
         except Exception as e:
             return False
 
-    async def connect_target_mysql(self, database: str):
-        """连接目标MySQL"""
-        try:
-            conn = await aiomysql.connect(
-                host=self.target_config.host,
-                port=self.target_config.port,
-                db=database,
-                user=self.target_config.username,
-                password=self.target_config.password,
-                connect_timeout=5,
-                charset='utf8mb4'
-            )
-            return conn
-        except Exception as e:
-            return None
 
-    async def connect_source_mysql(self, database: str):
-        """连接源MySQL"""
-        try:
-            conn = await aiomysql.connect(
-                host=self.source_config.host,
-                port=self.source_config.port,
-                db=database,
-                user=self.source_config.username,
-                password=self.source_config.password,
-                connect_timeout=5,
-                charset='utf8mb4'
-            )
-            return conn
-        except Exception as e:
-            print(f"❌ 源MySQL连接异常: {str(e)}")
-            return None
+
+
 
     async def initialize_tables_from_source_mysql(self):
         """从源MySQL初始化表结构"""
@@ -843,24 +809,13 @@ class MonitorApp(App[None]):
             if not schema_name:
                 continue
 
-            source_conn = await self.connect_source_mysql(schema_name)
+            source_conn = await self.source.connect(schema_name)
             if not source_conn:
                 continue
 
             try:
-                async with source_conn.cursor() as cursor:
-                    await cursor.execute("""
-                        SELECT TABLE_NAME
-                        FROM INFORMATION_SCHEMA.TABLES
-                        WHERE TABLE_SCHEMA = %s
-                          AND TABLE_TYPE = 'BASE TABLE'
-                    """, (schema_name,))
-
-                    source_table_names = []
-                    rows = await cursor.fetchall()
-                    for row in rows:
-                        table_name = row[0]
-                        source_table_names.append(table_name)
+                # 使用 MySQLConfig 的方法获取表列表
+                source_table_names = await self.source.get_tables_from_schema(source_conn, schema_name)
 
                 # 按目标表名分组
                 target_tables = {}
@@ -878,7 +833,6 @@ class MonitorApp(App[None]):
                             target_last_updated=current_time - timedelta(days=365),
                             last_updated=current_time
                         )
-
 
                 if target_tables:
                     schema_tables[schema_name] = target_tables
@@ -900,8 +854,8 @@ class MonitorApp(App[None]):
             return False
 
         try:
-            print(f"🔗 尝试连接源MySQL数据库: {schema_name}, host={self.source_config.host}, port={self.source_config.port}")
-            mysql_conn = await self.connect_source_mysql(schema_name)
+            print(f"🔗 尝试连接源MySQL数据库: {schema_name}, host={self.source.host}, port={self.source.port}")
+            mysql_conn = await self.source.connect(schema_name)
             if not mysql_conn:
                 print(f"❌ 无法连接到源MySQL数据库: {schema_name}")
                 return False
@@ -913,24 +867,7 @@ class MonitorApp(App[None]):
                     if self.stop_event.is_set():
                         return False
 
-                    # 第一次运行使用information_schema快速获取估计值
-                    async with mysql_conn.cursor() as cursor:
-                        await cursor.execute("""
-                                             SELECT table_name, table_rows
-                                             FROM information_schema.tables
-                                             WHERE table_schema = %s
-                                               AND table_type = 'BASE TABLE'
-                                             ORDER BY table_rows DESC
-                                             """, (schema_name,))
-
-                        # 建立表名到行数的映射
-                        table_rows_map = {}
-                        rows = await cursor.fetchall()
-                        for row in rows:
-                            table_name, table_rows = row
-                            table_rows_map[table_name] = table_rows or 0  # 处理NULL值
-
-                    # 更新TableInfo中的MySQL行数
+                    # 使用 MySQLConfig 的方法批量获取表行数
                     for table_info in tables_dict.values():
                         # 检查停止标志
                         if self.stop_event.is_set():
@@ -945,11 +882,14 @@ class MonitorApp(App[None]):
                             table_info.source_rows = 0  # 重置
                             print(f"🔄 开始更新源表 {table_info.full_name} 的记录数...")
 
-                            # 获取源表的估计行数
-                            source_table_name = table_info.target_table_name
-                            if source_table_name in table_rows_map:
-                                table_info.source_rows = table_rows_map[source_table_name]
+                        # 获取源表的估计行数
+                        source_table_name = table_info.target_table_name
+                        estimated_rows = await self.source.get_table_rows_from_information_schema(
+                            mysql_conn, schema_name, source_table_name
+                        )
 
+                        async with self.mysql_update_lock:
+                            table_info.source_rows = estimated_rows
                             table_info.source_last_updated = current_time
                             table_info.source_updating = False
                             table_info.source_is_estimated = True  # 标记为估计值
@@ -972,14 +912,10 @@ class MonitorApp(App[None]):
                                     ti.source_updating = False
                             return False
 
-                        # 在锁外执行查询以避免长时间锁定
-                        temp_mysql_rows = 0
-
                         # 获取源表名称
                         source_table_name = table_info.target_table_name
 
                         # 更新源表的记录数
-                        # 检查停止标志
                         if self.stop_event.is_set():
                             async with self.mysql_update_lock:
                                 for ti in tables_dict.values():
@@ -988,25 +924,10 @@ class MonitorApp(App[None]):
 
                         try:
                             print(f"🔍 正在查询源表 {source_table_name} 的记录数...")
-                            async with mysql_conn.cursor() as cursor:
-                                # 先尝试使用主键索引进行count查询
-                                try:
-                                    sql = f"SELECT COUNT(*) FROM `{source_table_name}` USE INDEX (PRIMARY)"
-                                    print(f"📝 执行SQL: {sql}")
-                                    await cursor.execute(sql)
-                                    result = await cursor.fetchone()
-                                    mysql_rows = result[0]
-                                    print(f"✅ 使用主键索引查询成功: {mysql_rows} 行")
-                                except Exception as index_e:
-                                    # 如果使用索引失败（可能没有主键索引），使用普通查询
-                                    print(f"⚠️ 主键索引查询失败: {str(index_e)}, 尝试普通查询")
-                                    sql = f"SELECT COUNT(*) FROM `{source_table_name}`"
-                                    print(f"📝 执行SQL: {sql}")
-                                    await cursor.execute(sql)
-                                    result = await cursor.fetchone()
-                                    mysql_rows = result[0]
-                                    print(f"✅ 普通查询成功: {mysql_rows} 行")
-                            temp_mysql_rows = mysql_rows
+                            temp_mysql_rows = await self.source.get_table_rows_count(
+                                mysql_conn, source_table_name
+                            )
+                            print(f"✅ 查询成功: {temp_mysql_rows} 行")
                         except Exception as e:
                             # 表可能不存在或无权限，跳过
                             print(f"❌ 查询源表 {source_table_name} 失败: {str(e)}")
@@ -1029,8 +950,7 @@ class MonitorApp(App[None]):
             # 出现异常时，标记所有表的source_updating为False
             async with self.mysql_update_lock:
                 for table_info in tables_dict.values():
-                    if table_info.source_updating:
-                        table_info.target_updating = False
+                    table_info.source_updating = False
             return False
 
     async def update_source_mysql_counts_async(self, target_tables: Dict[str, Dict[str, TableInfo]],
@@ -1061,7 +981,7 @@ class MonitorApp(App[None]):
         for schema_name, tables_dict in target_tables.items():
             await self._update_single_schema_source_mysql(schema_name, tables_dict, use_information_schema)
 
-    async def get_target_mysql_rows_from_information_schema(self, conn, target_tables: Dict[str, Dict[str, TableInfo]]):
+
         """第一次运行时使用information_schema快速获取目标MySQL表行数估计值"""
         current_time = datetime.now()
         self.target_updating = True
@@ -1122,7 +1042,7 @@ class MonitorApp(App[None]):
             return False
 
         try:
-            conn = await self.connect_source_mysql(schema_name)
+            conn = await self.source.connect(schema_name)
             if not conn:
                 return False
 
@@ -1146,11 +1066,8 @@ class MonitorApp(App[None]):
 
                     # 在锁外执行查询以避免长时间锁定
                     try:
-                        # 直接获取记录数
-                        async with conn.cursor() as cursor:
-                            await cursor.execute(f"SELECT COUNT(*) FROM `{schema_name}`.`{target_table_name}`")
-                            result = await cursor.fetchone()
-                            new_count = result[0] if result else 0
+                        # 使用 MySQLConfig 的方法获取精确行数
+                        new_count = await self.target.get_table_rows_count(conn, target_table_name)
 
                         # 查询完成后更新结果
                         async with self.target_update_lock:
