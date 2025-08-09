@@ -530,9 +530,9 @@ class MonitorApp(App[None]):
             if t.source_rows == -1:
                 source_rows_display = "[bold bright_red]ERROR[/]"
             elif t.source_is_estimated:
-                source_rows_display = f"[italic medium_purple1]~{t.source_rows:,}[/]"  # 估计值用斜体中紫色
+                source_rows_display = f"[italic green3]~{t.source_rows:,}[/]"  # 估计值用斜体绿色
             else:
-                source_rows_display = f"[bold bright_magenta]{t.source_rows:,}[/]"  # 精确值用亮洋红色粗体
+                source_rows_display = f"[bold bright_green]{t.source_rows:,}[/]"  # 精确值用亮绿色粗体
 
             # Schema名称和表名样式 - 使用更清晰的颜色
             schema_display = f"[bold medium_purple3]{t.schema_name[:12] + '...' if len(t.schema_name) > 15 else t.schema_name}[/]"  # Schema用中紫色
