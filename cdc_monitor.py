@@ -26,18 +26,20 @@ from textual.widgets import DataTable, Footer, Header, Static
 
 
 @dataclass
-class DatabaseConfig:
+class MySQLConfig:
     """数据库配置"""
     host: str
     port: int
     username: str
     password: str
+    databases: List[str] = field(default_factory=list)
 
 
 @dataclass
-class MySQLConfig(DatabaseConfig):
-    """MySQL配置"""
+class GlobConfig:
+    """全局配置"""
     databases: List[str] = field(default_factory=list)
+    refresh_interval: int = 3
 
 
 @dataclass
@@ -288,9 +290,9 @@ class MonitorApp(App[None]):
         super().__init__()
         self.config_file = config_file
         self.override_databases = override_databases
-        self.source_config = None
-        self.target_config = None
-        self.monitor_config = {}
+        self.source_config: Optional[MySQLConfig] = None
+        self.target_config: Optional[MySQLConfig] = None
+        self.global_config: Optional[GlobConfig] = None
         self.tables: List[TableInfo] = []
         self.iteration = 0
         self.start_time = datetime.now()
@@ -362,7 +364,7 @@ class MonitorApp(App[None]):
             return
 
         # 初始化数据库连接测试
-        target_conn = await self.connect_target_mysql(self.target_config.databases[0])
+        target_conn = await self.connect_target_mysql(self.global_config.databases[0])
         if not target_conn:
             self.exit(1)
             return
@@ -377,7 +379,7 @@ class MonitorApp(App[None]):
             return
 
         # 第一次数据更新
-        target_conn = await self.connect_target_mysql(self.target_config.databases[0])
+        target_conn = await self.connect_target_mysql(self.global_config.databases[0])
         if target_conn:
             await self.get_target_mysql_rows_from_information_schema(target_conn, target_tables)
             target_conn.close()
@@ -397,7 +399,7 @@ class MonitorApp(App[None]):
         self.update_display()
 
         # 启动定时刷新
-        refresh_interval = self.monitor_config.get('refresh_interval', 3)
+        refresh_interval = self.global_config.refresh_interval
         self.refresh_timer = self.set_interval(refresh_interval, self.refresh_data)
 
     def update_display(self):
@@ -776,8 +778,7 @@ class MonitorApp(App[None]):
                 host=mysql_source_section['host'],
                 port=int(mysql_source_section['port']),
                 username=mysql_source_section['username'],
-                password=mysql_source_section['password'],
-                databases=databases_list
+                password=mysql_source_section['password']
             )
 
             # 目标数据库 MySQL 配置
@@ -786,15 +787,15 @@ class MonitorApp(App[None]):
                 host=mysql_target_section['host'],
                 port=int(mysql_target_section['port']),
                 username=mysql_target_section['username'],
-                password=mysql_target_section['password'],
-                databases=databases_list
+                password=mysql_target_section['password']
             )
 
             # 全局配置
             global_section = config['global']
-            self.monitor_config = {
-                'refresh_interval': int(global_section.get('refresh_interval', 3)),
-            }
+            self.global_config = GlobConfig(
+                databases=databases_list,
+                refresh_interval=int(global_section.get('refresh_interval', 3))
+            )
             return True
 
         except Exception as e:
@@ -837,7 +838,7 @@ class MonitorApp(App[None]):
         """从源MySQL初始化表结构"""
         schema_tables = {}
 
-        for schema_name in self.source_config.databases:
+        for schema_name in self.global_config.databases:
             schema_name = schema_name.strip()
             if not schema_name:
                 continue
