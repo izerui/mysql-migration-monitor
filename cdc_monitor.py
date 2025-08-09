@@ -3,7 +3,7 @@
 """
 MySQL vs MySQL 数据一致性监控工具 - Textual版本
 使用Textual框架提供现代化的TUI界面，支持DataTable滚动查看
-实时监控两个MySQL数据库之间的数据同步状态，支持多数据库对比和智能表名映射。
+实时监控两个MySQL数据库之间的数据迁移状态，支持多数据库对比和表名一一对应映射。
 """
 
 import argparse
@@ -46,13 +46,11 @@ class MySQLConfig(DatabaseConfig):
 class TableInfo:
     """表信息"""
     schema_name: str
-    target_table_name: str  # 目标MySQL中的表名
+    target_table_name: str  # 目标MySQL中的表名（内部使用）
     source_rows: int = 0
     target_rows: int = 0
     previous_source_rows: int = 0
     previous_target_rows: int = 0
-    source_tables: List[str] = field(default_factory=list)
-    target_tables: List[str] = field(default_factory=list)
     last_updated: datetime = field(default_factory=datetime.now)
     source_last_updated: datetime = field(default_factory=datetime.now)
     target_last_updated: datetime = field(default_factory=datetime.now)
@@ -81,105 +79,23 @@ class TableInfo:
             return True
         return self.target_rows == self.source_rows
 
-    @property
     def full_name(self) -> str:
         """完整表名"""
         return f"{self.schema_name}.{self.target_table_name}"
 
 
 class SyncProperties:
-    """表名映射规则（与Java版本保持一致）"""
+    """表名映射规则 - 数据迁移专用，一一对应映射"""
 
     @staticmethod
     def get_target_table_name(source_table_name: str) -> str:
         """
         生成目标表名
-        应用表名映射规则：table_runtime、table_uuid、table_数字 统一映射到 table
+        数据迁移场景下，源表和目标表一一对应，直接返回源表名作为目标表名
         """
-        if not source_table_name or not source_table_name.strip():
-            return source_table_name
-
-        # 检查是否包含下划线
-        if '_' not in source_table_name:
-            return source_table_name  # 没有下划线，直接返回
-
-        # 1. 检查 runtime 后缀
-        if source_table_name.endswith('_runtime'):
-            return source_table_name[:-8]  # 移除 "_runtime"
-
-        # 2. 检查 9位数字后缀
-        last_underscore_index = source_table_name.rfind('_')
-        if last_underscore_index > 0:
-            suffix = source_table_name[last_underscore_index + 1:]
-            if SyncProperties._is_numeric_suffix(suffix):
-                return source_table_name[:last_underscore_index]
-
-        # 2a. 检查 9位数字_年度 格式
-        # 例如: order_bom_item_333367878_2018
-        if re.match(r'.*_\d{9}_\d{4}$', source_table_name):
-            return re.sub(r'_\d{9}_\d{4}$', '', source_table_name)
-
-        # 3. 检查各种UUID格式后缀
-        extracted_base_name = SyncProperties._extract_table_name_from_uuid(source_table_name)
-        if extracted_base_name != source_table_name:
-            return extracted_base_name
-
-        # 不符合映射规则，保持原样
         return source_table_name
 
-    @staticmethod
-    def _is_numeric_suffix(s: str) -> bool:
-        """检查字符串是否为9位纯数字"""
-        if not s or not s.strip():
-            return False
-        return re.match(r'^\d{9}$', s) is not None
-
-    @staticmethod
-    def _extract_table_name_from_uuid(table_name: str) -> str:
-        """
-        从包含UUID的表名中提取基础表名
-        支持多种UUID格式：
-        1. order_bom_0e9b60a4_d6ed_473d_a326_9e8c8f744ec2 -> order_bom
-        2. users_a1b2c3d4-e5f6-7890-abcd-ef1234567890 -> users
-        3. products_a1b2c3d4e5f67890abcdef1234567890 -> products
-        """
-        if not table_name or '_' not in table_name:
-            return table_name
-
-        # 模式1: 下划线分隔的UUID格式 (8_4_4_4_12)
-        # 例如: order_bom_0e9b60a4_d6ed_473d_a326_9e8c8f744ec2
-        pattern1 = r'_[0-9a-fA-F]{8}_[0-9a-fA-F]{4}_[0-9a-fA-F]{4}_[0-9a-fA-F]{4}_[0-9a-fA-F]{12}$'
-        if re.search(pattern1, table_name):
-            return re.sub(pattern1, '', table_name)
-
-        # 模式2: 连字符分隔的UUID格式 (8-4-4-4-12)
-        # 例如: users_a1b2c3d4-e5f6-7890-abcd-ef1234567890
-        pattern2 = r'_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
-        if re.search(pattern2, table_name):
-            return re.sub(pattern2, '', table_name)
-
-        # 模式3: 下划线分隔的UUID格式后跟年度 (8_4_4_4_12_年度)
-        # 例如: order_bom_item_05355967_c503_4a2d_9dd1_2dd7a9ffa15e_2030
-        pattern3 = r'_[0-9a-fA-F]{8}_[0-9a-fA-F]{4}_[0-9a-fA-F]{4}_[0-9a-fA-F]{4}_[0-9a-fA-F]{12}_\d{4}$'
-        if re.search(pattern3, table_name):
-            return re.sub(pattern3, '', table_name)
-
-        # 模式4: 混合格式 - 移除所有分隔符后检查是否为32位十六进制
-        parts = table_name.split('_')
-        if len(parts) >= 2:
-            # 从后往前组合，找到可能的UUID开始位置
-            for i in range(len(parts) - 1, 0, -1):
-                possible_uuid_parts = parts[i:]
-                possible_uuid = '_'.join(possible_uuid_parts)
-                clean_uuid = re.sub(r'[-_]', '', possible_uuid)
-
-                if len(clean_uuid) == 32 and re.match(r'^[0-9a-fA-F]{32}$', clean_uuid):
-                    # 找到了UUID，返回基础表名
-                    return '_'.join(parts[:i])
-                elif len(clean_uuid) > 32:
-                    break  # 太长了，不可能是UUID
-
-        return table_name  # 没有找到UUID模式，返回原表名
+    pass  # 类已简化，无需额外方法
 
 
 class StatsWidget(Static):
@@ -272,12 +188,12 @@ class StatsWidget(Static):
 
         text.append("\n")
 
-        # 进度信息和同步速度 - 带进度条和速度估算
+        # 进度信息和迁移速度 - 带进度条和速度估算
         if total_source_rows > 0:
             completion_rate = min(total_target_rows / total_source_rows, 1.0)
             completion_percent = completion_rate * 100
 
-            text.append("📊 同步进度: ", style="bold cyan")
+            text.append("📊 迁移进度: ", style="bold cyan")
 
             # 创建进度条
             bar_width = 20
@@ -304,9 +220,9 @@ class StatsWidget(Static):
                 remaining = total_source_rows - total_target_rows
                 text.append(f" - 剩余: {remaining:,} 行", style="dim")
 
-                # 计算同步速度和预估时间
+                # 计算迁移速度和预估时间
                 if hasattr(self, 'parent_app') and self.parent_app:
-                    speed = self.parent_app.calculate_sync_speed()
+                    speed = self.parent_app.calculate_migration_speed()
                     if speed > 0:
                         text.append(f" - 速度: {speed:.1f} 行/秒", style="bright_blue")
                         estimated_time = self.parent_app.estimate_remaining_time(total_source_rows, total_target_rows, speed)
@@ -391,7 +307,7 @@ class MonitorApp(App[None]):
         self.monitor_config = {}
         self.tables: List[TableInfo] = []
         self.iteration = 0
-        self.sync_props = SyncProperties()
+        self.migration_props = SyncProperties()
         self.start_time = datetime.now()
 
         # 分离的更新计数器
@@ -446,9 +362,9 @@ class MonitorApp(App[None]):
         # 设置数据表格
         table = self.query_one("#tables", DataTable)
         table.add_columns(
-            "序号", "状态", "SCHEMA", "目标表名", "目标记录数",
-            "源汇总数", "数据差异", "变化量", "目标更新时间",
-            "源更新时间", "源表数量"
+            "序号", "状态", "SCHEMA", "表名", "目标行数",
+            "源行数", "差异", "变化量", "目标更新",
+            "源更新"
         )
 
         # 启动监控任务
@@ -636,16 +552,21 @@ class MonitorApp(App[None]):
                 else:
                     target_time_display = f"[dim bright_black]{target_relative_time}[/]"  # 最近更新用暗色
 
-            # 源表数量样式 - 使用原来MySQL更新时间的颜色方案
-            source_count = len(t.source_tables)
-            if source_count >= 5:
-                source_count_display = f"[bold orange1]{source_count}[/]"  # 源表多用橙色
-            elif source_count >= 3:
-                source_count_display = f"[bold yellow3]{source_count}[/]"  # 中等数量用深黄色
-            elif source_count >= 2:
-                source_count_display = f"[bright_cyan]{source_count}[/]"  # 少量用亮青色
+            # 源更新时间样式 - 使用原来MySQL更新时间的颜色方案
+            if t.source_updating:
+                source_time_display = "[yellow3]更新中[/]"  # 使用更温和的深黄色
             else:
-                source_count_display = f"[dim bright_white]{source_count}[/]"  # 单表用暗亮白色
+                source_relative_time = self.get_relative_time(t.source_last_updated)
+                if "年前" in source_relative_time or "个月前" in source_relative_time:
+                    source_time_display = f"[bold orange1]{source_relative_time}[/]"  # 很久没更新用橙色
+                elif "天前" in source_relative_time:
+                    source_time_display = f"[bold yellow3]{source_relative_time}[/]"  # 几天前用深黄色
+                elif "小时前" in source_relative_time:
+                    source_time_display = f"[bright cyan]{source_relative_time}[/]"  # 几小时前用亮青色
+                else:
+                    source_time_display = f"[dim bright_black]{source_relative_time}[/]"  # 最近更新用暗色
+
+
 
             # 添加行到表格
             table.add_row(
@@ -658,8 +579,7 @@ class MonitorApp(App[None]):
                 diff_text,
                 change_text,
                 target_time_display,
-                source_status,
-                source_count_display
+                source_time_display
             )
 
         # 尝试恢复光标位置和滚动位置
@@ -800,8 +720,8 @@ class MonitorApp(App[None]):
         if len(self.history_data) > self.max_history_points:
             self.history_data.pop(0)
 
-    def calculate_sync_speed(self) -> float:
-        """计算同步速度（记录/秒）"""
+    def calculate_migration_speed(self) -> float:
+        """计算迁移速度（记录/秒）"""
         if len(self.history_data) < 2:
             return 0.0
 
@@ -822,7 +742,7 @@ class MonitorApp(App[None]):
         return total_change / time_span if time_span > 0 else 0.0
 
     def estimate_remaining_time(self, source_total: int, target_total: int, speed: float) -> str:
-        """估算剩余时间"""
+        """估算剩余迁移时间"""
         if speed <= 0 or source_total <= 0:
             return "无法估算"
 
@@ -965,7 +885,7 @@ class MonitorApp(App[None]):
                 # 按目标表名分组
                 target_tables = {}
                 for source_table_name in source_table_names:
-                    target_table_name = self.sync_props.get_target_table_name(source_table_name)
+                    target_table_name = self.migration_props.get_target_table_name(source_table_name)
 
                     if target_table_name not in target_tables:
                         current_time = datetime.now()
@@ -978,9 +898,7 @@ class MonitorApp(App[None]):
                             target_last_updated=current_time - timedelta(days=365),
                             last_updated=current_time
                         )
-                        target_tables[target_table_name].source_tables.append(source_table_name)
-                    else:
-                        target_tables[target_table_name].source_tables.append(source_table_name)
+
 
                 if target_tables:
                     schema_tables[schema_name] = target_tables
@@ -1046,10 +964,9 @@ class MonitorApp(App[None]):
                             table_info.source_rows = 0  # 重置
                             print(f"🔄 开始更新源表 {table_info.full_name} 的记录数...")
 
-                            # 累加所有源表的估计行数
-                            for mysql_table_name in table_info.source_tables:
-                                if mysql_table_name in table_rows_map:
-                                    table_info.source_rows += table_rows_map[mysql_table_name]
+                            # 获取源表的估计行数
+                            if table_name in table_rows_map:
+                                table_info.source_rows = table_rows_map[table_name]
 
                             table_info.source_last_updated = current_time
                             table_info.source_updating = False
@@ -1076,14 +993,13 @@ class MonitorApp(App[None]):
                         # 在锁外执行查询以避免长时间锁定
                         temp_mysql_rows = 0
 
-                        # 更新所有源表的记录数
-                        for mysql_table_name in table_info.source_tables:
-                            # 检查停止标志
-                            if self.stop_event.is_set():
-                                async with self.mysql_update_lock:
-                                    for ti in tables_dict.values():
-                                        ti.source_updating = False
-                                return False
+                        # 更新源表的记录数
+                        # 检查停止标志
+                        if self.stop_event.is_set():
+                            async with self.mysql_update_lock:
+                                for ti in tables_dict.values():
+                                    ti.source_updating = False
+                            return False
 
                             try:
                                 async with mysql_conn.cursor() as cursor:
