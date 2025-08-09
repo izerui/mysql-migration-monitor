@@ -778,13 +778,23 @@ class MonitorApp(App[None]):
             config = ConfigParser()
             config.read(config_path, encoding='utf-8')
 
-            # 源MySQL配置
-            mysql_source_section = config['mysql']
+            # 读取共享数据库配置
             if self.override_databases:
                 databases_list = self.override_databases
             else:
-                databases_list = mysql_source_section['databases'].split(',')
+                # 优先使用新的共享配置格式
+                if 'databases' in config:
+                    databases_section = config['databases']
+                    databases_list = [db.strip() for db in databases_section['names'].split(',')]
+                else:
+                    # 兼容旧的配置格式
+                    source_section_name = 'source' if 'source' in config else 'mysql'
+                    mysql_source_section = config[source_section_name]
+                    databases_list = mysql_source_section['databases'].split(',')
 
+            # 源数据库 MySQL 配置
+            source_section_name = 'source' if 'source' in config else 'mysql'
+            mysql_source_section = config[source_section_name]
             self.source_config = MySQLConfig(
                 host=mysql_source_section['host'],
                 port=int(mysql_source_section['port']),
@@ -792,29 +802,27 @@ class MonitorApp(App[None]):
                 username=mysql_source_section['username'],
                 password=mysql_source_section['password'],
                 databases=databases_list,
-                ignored_prefixes=mysql_source_section.get('ignored_table_prefixes', '').split(',')
+                ignored_prefixes=[]
             )
 
-            # 目标MySQL配置
-            mysql_target_section = config['mysql_target']
+            # 目标数据库 MySQL 配置
+            target_section_name = 'target' if 'target' in config else 'mysql_target'
+            mysql_target_section = config[target_section_name]
             self.target_config = MySQLConfig(
                 host=mysql_target_section['host'],
                 port=int(mysql_target_section['port']),
                 database="",
                 username=mysql_target_section['username'],
                 password=mysql_target_section['password'],
-                databases=[db.strip() for db in mysql_target_section['databases'].split(',')],
-                ignored_prefixes=mysql_target_section.get('ignored_table_prefixes', '').split(',')
+                databases=databases_list,
+                ignored_prefixes=[]
             )
 
             # 监控配置
             monitor_section = config['monitor']
             self.monitor_config = {
                 'refresh_interval': int(monitor_section.get('refresh_interval', 3)),
-                'mysql_update_interval': int(monitor_section.get('mysql_update_interval', 3)),
             }
-
-            self.mysql_update_interval = self.monitor_config['mysql_update_interval']
             return True
 
         except Exception as e:

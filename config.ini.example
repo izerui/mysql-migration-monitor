@@ -1,31 +1,22 @@
-[mysql]
-# 源MySQL配置
+# 数据库配置
+[databases]
+# 要监控的数据库列表（逗号分隔）
+names = cloud_sale,other_db
+
+[source]
+# 源数据库 MySQL 配置
 host = localhost
 port = 3306
-databases = source_db1,source_db2,source_db3
 username = root
 password = your_source_password
-ignored_table_prefixes = __spliting_,__temp_,__backup_,customer_supply_demand
 
-[mysql_target]
-# 目标MySQL配置
+[target]
+# 目标数据库 MySQL 配置
 host = localhost
 port = 3307
-databases = target_db1,target_db2,target_db3
 username = root
 password = your_target_password
-ignored_table_prefixes = __spliting_,__temp_,__backup_,customer_supply_demand
 
 [monitor]
 # 刷新间隔，单位秒
 refresh_interval = 2
-# 是否启用清屏
-enable_clear_screen = true
-# 源MySQL更新间隔（目标更新次数）
-mysql_update_interval = 3
-# 最大显示行数（超过此数量将启用滚动显示）
-max_display_rows = 50
-# 是否启用自动滚动
-auto_scroll = true
-# 自动滚动间隔（秒）
-scroll_interval = 5
