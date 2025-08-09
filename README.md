@@ -1,10 +1,5 @@
 # MySQL vs MySQL 数据一致性监控工具
 
-<div align="center">
-  <img src="images/monitor-interface.png" alt="CDC监控界面" width="100%">
-  <p><em>实时MySQL与MySQL数据一致性监控界面</em></p>
-</div>
-
 一个专业的MySQL vs MySQL数据一致性监控工具，实时监控两个MySQL数据库之间的数据同步状态。该工具通过智能的表名映射和双数据库对比，帮助您快速发现和诊断数据同步过程中的一致性问题。
 
 ## ✨ 核心特性
