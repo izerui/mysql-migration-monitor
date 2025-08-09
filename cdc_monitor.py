@@ -362,8 +362,8 @@ class MonitorApp(App[None]):
         # 设置数据表格
         table = self.query_one("#tables", DataTable)
         table.add_columns(
-            "序号", "状态", "SCHEMA", "表名", "目标行数",
-            "源行数", "差异", "变化量", "目标更新",
+            "序号", "状态", "SCHEMA", "表名", "源行数",
+            "目标行数", "差异", "变化量", "目标更新",
             "源更新"
         )
 
@@ -574,8 +574,8 @@ class MonitorApp(App[None]):
                 icon,
                 schema_display,
                 table_display,
-                target_rows_display,
                 source_rows_display,
+                target_rows_display,
                 diff_text,
                 change_text,
                 target_time_display,
@@ -850,6 +850,7 @@ class MonitorApp(App[None]):
             )
             return conn
         except Exception as e:
+            print(f"❌ 源MySQL连接异常: {str(e)}")
             return None
 
     async def initialize_tables_from_source_mysql(self):
@@ -920,6 +921,7 @@ class MonitorApp(App[None]):
             return False
 
         try:
+            print(f"🔗 尝试连接源MySQL数据库: {schema_name}, host={self.source_config.host}, port={self.source_config.port}")
             mysql_conn = await self.connect_source_mysql(schema_name)
             if not mysql_conn:
                 print(f"❌ 无法连接到源MySQL数据库: {schema_name}")
@@ -965,8 +967,9 @@ class MonitorApp(App[None]):
                             print(f"🔄 开始更新源表 {table_info.full_name} 的记录数...")
 
                             # 获取源表的估计行数
-                            if table_name in table_rows_map:
-                                table_info.source_rows = table_rows_map[table_name]
+                            source_table_name = table_info.target_table_name
+                            if source_table_name in table_rows_map:
+                                table_info.source_rows = table_rows_map[source_table_name]
 
                             table_info.source_last_updated = current_time
                             table_info.source_updating = False
@@ -993,6 +996,9 @@ class MonitorApp(App[None]):
                         # 在锁外执行查询以避免长时间锁定
                         temp_mysql_rows = 0
 
+                        # 获取源表名称
+                        source_table_name = table_info.target_table_name
+
                         # 更新源表的记录数
                         # 检查停止标志
                         if self.stop_event.is_set():
@@ -1001,31 +1007,40 @@ class MonitorApp(App[None]):
                                     ti.source_updating = False
                             return False
 
-                            try:
-                                async with mysql_conn.cursor() as cursor:
-                                    # 先尝试使用主键索引进行count查询
-                                    try:
-                                        await cursor.execute(
-                                            f"SELECT COUNT(*) FROM `{mysql_table_name}` USE INDEX (PRIMARY)")
-                                        result = await cursor.fetchone()
-                                        mysql_rows = result[0]
-                                    except Exception:
-                                        # 如果使用索引失败（可能没有主键索引），使用普通查询
-                                        await cursor.execute(f"SELECT COUNT(*) FROM `{mysql_table_name}`")
-                                        result = await cursor.fetchone()
-                                        mysql_rows = result[0]
-                                temp_mysql_rows += mysql_rows
-                            except Exception as e:
-                                # 表可能不存在或无权限，跳过
-                                continue
+                        try:
+                            print(f"🔍 正在查询源表 {source_table_name} 的记录数...")
+                            async with mysql_conn.cursor() as cursor:
+                                # 先尝试使用主键索引进行count查询
+                                try:
+                                    sql = f"SELECT COUNT(*) FROM `{source_table_name}` USE INDEX (PRIMARY)"
+                                    print(f"📝 执行SQL: {sql}")
+                                    await cursor.execute(sql)
+                                    result = await cursor.fetchone()
+                                    mysql_rows = result[0]
+                                    print(f"✅ 使用主键索引查询成功: {mysql_rows} 行")
+                                except Exception as index_e:
+                                    # 如果使用索引失败（可能没有主键索引），使用普通查询
+                                    print(f"⚠️ 主键索引查询失败: {str(index_e)}, 尝试普通查询")
+                                    sql = f"SELECT COUNT(*) FROM `{source_table_name}`"
+                                    print(f"📝 执行SQL: {sql}")
+                                    await cursor.execute(sql)
+                                    result = await cursor.fetchone()
+                                    mysql_rows = result[0]
+                                    print(f"✅ 普通查询成功: {mysql_rows} 行")
+                            temp_mysql_rows = mysql_rows
+                        except Exception as e:
+                            # 表可能不存在或无权限，跳过
+                            print(f"❌ 查询源表 {source_table_name} 失败: {str(e)}")
+                            temp_mysql_rows = -1
 
                         # 查询完成后更新结果
                         async with self.mysql_update_lock:
+                            old_rows = table_info.source_rows
                             table_info.source_rows = temp_mysql_rows
                             table_info.source_last_updated = current_time
                             table_info.source_updating = False
                             table_info.source_is_estimated = False  # 标记为精确值
-                            print(f"✅ 完成精确更新源表 {table_info.full_name}: {table_info.source_rows} 条记录")
+                            print(f"✅ 完成精确更新源表 {table_info.full_name}: {old_rows} -> {table_info.source_rows} 条记录")
 
                 return True
             finally:
