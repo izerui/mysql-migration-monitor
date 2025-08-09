@@ -2,6 +2,8 @@
 [global]
 # 要迁移的数据库，支持多个
 databases = cloud_sale,other_db
+# 刷新间隔，单位秒
+refresh_interval = 3
 
 [source]
 # 源数据库 MySQL 配置
@@ -16,7 +18,3 @@ host = localhost
 port = 3307
 username = root
 password = your_target_password
-
-[monitor]
-# 刷新间隔，单位秒
-refresh_interval = 3

@@ -101,7 +101,7 @@ check_config() {
         print_success "找到配置文件: $config_file"
 
         # 检查配置文件格式
-        if grep -q "\[global\]" "$config_file" && grep -q "\[source\]" "$config_file" && grep -q "\[target\]" "$config_file"; then
+        if grep -q "\[global\]" "$config_file"; then
             print_success "配置文件格式正确"
         else
             print_error "配置文件格式不正确"
@@ -109,6 +109,7 @@ check_config() {
             echo ""
             echo "[global]"
             echo "databases = your_database_name"
+            echo "refresh_interval = 3"
             echo ""
             echo "[source]"
             echo "# 源数据库配置"
@@ -123,9 +124,6 @@ check_config() {
             echo "port = 3306"
             echo "username = your_username"
             echo "password = your_password"
-            echo ""
-            echo "[monitor]"
-            echo "refresh_interval = 3"
             echo ""
             exit 1
         fi

@@ -809,16 +809,11 @@ class MonitorApp(App[None]):
                 ignored_prefixes=[]
             )
 
-            # 监控配置（可选）
-            if 'monitor' in config:
-                monitor_section = config['monitor']
-                self.monitor_config = {
-                    'refresh_interval': int(monitor_section.get('refresh_interval', 3)),
-                }
-            else:
-                self.monitor_config = {
-                    'refresh_interval': 3,
-                }
+            # 全局配置
+            global_section = config['global']
+            self.monitor_config = {
+                'refresh_interval': int(global_section.get('refresh_interval', 3)),
+            }
             return True
 
         except Exception as e:
