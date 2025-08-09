@@ -778,23 +778,15 @@ class MonitorApp(App[None]):
             config = ConfigParser()
             config.read(config_path, encoding='utf-8')
 
-            # 读取共享数据库配置
+            # 读取全局数据库配置
             if self.override_databases:
                 databases_list = self.override_databases
             else:
-                # 优先使用新的共享配置格式
-                if 'databases' in config:
-                    databases_section = config['databases']
-                    databases_list = [db.strip() for db in databases_section['names'].split(',')]
-                else:
-                    # 兼容旧的配置格式
-                    source_section_name = 'source' if 'source' in config else 'mysql'
-                    mysql_source_section = config[source_section_name]
-                    databases_list = mysql_source_section['databases'].split(',')
+                global_section = config['global']
+                databases_list = [db.strip() for db in global_section['databases'].split(',')]
 
             # 源数据库 MySQL 配置
-            source_section_name = 'source' if 'source' in config else 'mysql'
-            mysql_source_section = config[source_section_name]
+            mysql_source_section = config['source']
             self.source_config = MySQLConfig(
                 host=mysql_source_section['host'],
                 port=int(mysql_source_section['port']),
@@ -806,8 +798,7 @@ class MonitorApp(App[None]):
             )
 
             # 目标数据库 MySQL 配置
-            target_section_name = 'target' if 'target' in config else 'mysql_target'
-            mysql_target_section = config[target_section_name]
+            mysql_target_section = config['target']
             self.target_config = MySQLConfig(
                 host=mysql_target_section['host'],
                 port=int(mysql_target_section['port']),
@@ -818,11 +809,16 @@ class MonitorApp(App[None]):
                 ignored_prefixes=[]
             )
 
-            # 监控配置
-            monitor_section = config['monitor']
-            self.monitor_config = {
-                'refresh_interval': int(monitor_section.get('refresh_interval', 3)),
-            }
+            # 监控配置（可选）
+            if 'monitor' in config:
+                monitor_section = config['monitor']
+                self.monitor_config = {
+                    'refresh_interval': int(monitor_section.get('refresh_interval', 3)),
+                }
+            else:
+                self.monitor_config = {
+                    'refresh_interval': 3,
+                }
             return True
 
         except Exception as e:

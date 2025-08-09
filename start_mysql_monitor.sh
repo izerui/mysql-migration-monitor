@@ -1,6 +1,6 @@
 #!/bin/bash
 # MySQL vs MySQL 数据一致性监控启动脚本
-# 基于原PostgreSQL监控工具改造，支持双MySQL数据库对比
+# 支持源数据库到目标数据库的数据迁移监控和一致性对比
 
 set -e  # 遇到错误立即退出
 
@@ -35,8 +35,8 @@ show_welcome() {
     echo "║                                                                              ║"
     echo "║                    MySQL vs MySQL 数据一致性监控工具                        ║"
     echo "║                                                                              ║"
-    echo "║         实时监控两个MySQL数据库之间的数据迁移状态                          ║"
-    echo "║         支持数据迁移场景下的表名一一对应映射和多数据库对比                  ║"
+    echo "║         实时监控源数据库到目标数据库的数据迁移状态                        ║"
+    echo "║         提供简洁清晰的配置格式和高效的数据一致性对比                      ║"
     echo "║                                                                              ║"
     echo "╚══════════════════════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
@@ -77,37 +77,61 @@ check_uv() {
 
 # 检查配置文件
 check_config() {
+    local config_file="config.ini"
+    local args=("$@")
+
+    # 检查是否有自定义配置文件参数
+    for ((i=0; i<${#args[@]}; i++)); do
+        if [[ "${args[i]}" == "--config" ]]; then
+            # 处理 --config file.ini 格式
+            if [[ $((i+1)) -lt ${#args[@]} ]]; then
+                config_file="${args[$((i+1))]}"
+            fi
+            break
+        elif [[ "${args[i]}" == --config=* ]]; then
+            # 处理 --config=file.ini 格式
+            config_file="${args[i]#--config=}"
+            break
+        fi
+    done
+
     print_info "检查配置文件..."
 
-    if [[ -f "config.ini" ]]; then
-        print_success "找到配置文件: config.ini"
+    if [[ -f "$config_file" ]]; then
+        print_success "找到配置文件: $config_file"
 
-        # 检查配置文件中是否包含mysql_target配置
-        if grep -q "\[mysql_target\]" config.ini; then
+        # 检查配置文件格式
+        if grep -q "\[global\]" "$config_file" && grep -q "\[source\]" "$config_file" && grep -q "\[target\]" "$config_file"; then
             print_success "配置文件格式正确"
         else
-            print_error "配置文件缺少[mysql_target]部分"
-            print_info "请确保config.ini包含以下配置:"
+            print_error "配置文件格式不正确"
+            print_info "请确保$config_file包含以下配置:"
             echo ""
-            echo "[mysql]"
+            echo "[global]"
+            echo "databases = your_database_name"
+            echo ""
+            echo "[source]"
+            echo "# 源数据库配置"
             echo "host = your_source_mysql_host"
             echo "port = 3306"
-            echo "databases = source_db1,source_db2"
             echo "username = your_username"
             echo "password = your_password"
             echo ""
-            echo "[mysql_target]"
+            echo "[target]"
+            echo "# 目标数据库配置"
             echo "host = your_target_mysql_host"
             echo "port = 3306"
-            echo "databases = target_db1,target_db2"
             echo "username = your_username"
             echo "password = your_password"
+            echo ""
+            echo "[monitor]"
+            echo "refresh_interval = 3"
             echo ""
             exit 1
         fi
     else
-        print_error "未找到配置文件: config.ini"
-        print_info "请复制config.ini.example为config.ini并配置数据库信息"
+        print_error "未找到配置文件: $config_file"
+        print_info "请复制config.ini.example为$config_file并配置数据库信息"
         exit 1
     fi
 }
@@ -134,13 +158,31 @@ test_connections() {
 
 # 启动监控程序
 start_monitor() {
+    local config_file="config.ini"
+    local args=("$@")
+
+    # 检查是否有自定义配置文件参数
+    for ((i=0; i<${#args[@]}; i++)); do
+        if [[ "${args[i]}" == "--config" ]]; then
+            # 处理 --config file.ini 格式
+            if [[ $((i+1)) -lt ${#args[@]} ]]; then
+                config_file="${args[$((i+1))]}"
+            fi
+            break
+        elif [[ "${args[i]}" == --config=* ]]; then
+            # 处理 --config=file.ini 格式
+            config_file="${args[i]#--config=}"
+            break
+        fi
+    done
+
     print_info "启动MySQL vs MySQL监控程序..."
     echo ""
 
     # 显示启动参数
     print_info "启动参数:"
-    echo "  配置文件: config.ini"
-    echo "  监控模式: MySQL → MySQL"
+    echo "  配置文件: $config_file"
+    echo "  监控模式: Source MySQL → Target MySQL"
     echo ""
 
     # 启动监控程序
@@ -179,7 +221,7 @@ main() {
     # 执行检查步骤
     check_python
     check_uv
-    check_config
+    check_config "$@"
     install_dependencies
     # 跳过测试连接，直接启动
     # test_connections
