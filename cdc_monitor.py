@@ -82,18 +82,6 @@ class TableInfo:
         return f"{self.schema_name}.{self.target_table_name}"
 
 
-class SyncProperties:
-    """表名映射规则 - 数据迁移专用，一一对应映射"""
-
-    @staticmethod
-    def get_target_table_name(source_table_name: str) -> str:
-        """
-        生成目标表名
-        数据迁移场景下，源表和目标表一一对应，直接返回源表名作为目标表名
-        """
-        return source_table_name
-
-    pass  # 类已简化，无需额外方法
 
 
 class StatsWidget(Static):
@@ -305,7 +293,6 @@ class MonitorApp(App[None]):
         self.monitor_config = {}
         self.tables: List[TableInfo] = []
         self.iteration = 0
-        self.migration_props = SyncProperties()
         self.start_time = datetime.now()
 
         # 分离的更新计数器
@@ -877,7 +864,7 @@ class MonitorApp(App[None]):
                 # 按目标表名分组
                 target_tables = {}
                 for source_table_name in source_table_names:
-                    target_table_name = self.migration_props.get_target_table_name(source_table_name)
+                    target_table_name = source_table_name
 
                     if target_table_name not in target_tables:
                         current_time = datetime.now()
