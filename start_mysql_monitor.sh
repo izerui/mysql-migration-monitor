@@ -126,123 +126,67 @@ install_dependencies() {
     fi
 }
 
-# 测试数据库连接
+# 跳过数据库连接测试
 test_connections() {
-    print_info "测试数据库连接..."
+    print_info "跳过数据库连接测试..."
+    print_success "将在程序启动时进行连接验证"
+}
 
-    # 创建简单的测试脚本
-    cat > test_connection.py << 'EOF'
-+#!/usr/bin/env python3
-+import asyncio
-+import sys
-+import os
-+from pathlib import Path
-+
-+sys.path.insert(0, str(Path(__file__).parent))
-+
-+async def test_connections():
-+    try:
-+        from cdc_monitor import MonitorApp
-+        app = MonitorApp()
-+
-+        if not await app.load_config():
-+            print("❌ 配置文件加载失败")
-+            return False
-+
-+        # 测试源MySQL连接
-+        source_conn = await app.connect_source_mysql(app.source_config.databases[0])
-+        if source_conn:
-+            await source_conn.close()
-+            print("✅ 源MySQL连接成功")
-+        else:
-+            print("❌ 源MySQL连接失败")
-+            return False
-+
-+        # 测试目标MySQL连接
-+        target_conn = await app.connect_target_mysql(app.target_config.databases[0])
-+        if target_conn:
-+            await target_conn.close()
-+            print("✅ 目标MySQL连接成功")
-+        else:
-+            print("❌ 目标MySQL连接失败")
-+            return False
-+
-+        return True
-+
-+    except Exception as e:
-+        print(f"❌ 测试失败: {e}")
-+        return False
-+
-+if __name__ == "__main__":
-+    asyncio.run(test_connections())
-+EOF
-+
-+    chmod +x test_connection.py
-+
-+    if uv run python test_connection.py; then
-+        print_success "数据库连接测试通过"
-+        rm -f test_connection.py
-+    else
-+        print_error "数据库连接测试失败"
-+        rm -f test_connection.py
-+        exit 1
-+    fi
-+}
-+
 # 启动监控程序
 start_monitor() {
-+    print_info "启动MySQL vs MySQL监控程序..."
-+    echo ""
-+
-+    # 显示启动参数
-+    print_info "启动参数:"
-+    echo "  配置文件: config.ini"
-+    echo "  监控模式: MySQL → MySQL"
-+    echo ""
-+
-+    # 启动监控程序
-+    uv run cdc_monitor.py "$@"
-+}
-+
+    print_info "启动MySQL vs MySQL监控程序..."
+    echo ""
+
+    # 显示启动参数
+    print_info "启动参数:"
+    echo "  配置文件: config.ini"
+    echo "  监控模式: MySQL → MySQL"
+    echo ""
+
+    # 启动监控程序
+    uv run cdc_monitor.py "$@"
+}
+
 # 显示使用帮助
 show_help() {
-+    echo ""
-+    echo "使用方法:"
-+    echo "  ./start_mysql_monitor.sh                    # 使用默认配置启动"
-+    echo "  ./start_mysql_monitor.sh --databases db1,db2 # 监控指定数据库"
-+    echo "  ./start_mysql_monitor.sh --config my.ini    # 使用自定义配置"
-+    echo ""
-+    echo "快捷键:"
-+    echo "  q 或 Ctrl+C  - 退出程序"
-+    echo "  r            - 手动刷新"
-+    echo "  p            - 暂停/继续"
-+    echo "  s            - 切换排序方式"
-+    echo "  f            - 切换过滤模式"
-+    echo ""
-+}
-+
+    echo ""
+    echo "使用方法:"
+    echo "  ./start_mysql_monitor.sh                    # 使用默认配置启动"
+    echo "  ./start_mysql_monitor.sh --databases db1,db2 # 监控指定数据库"
+    echo "  ./start_mysql_monitor.sh --config my.ini    # 使用自定义配置"
+    echo ""
+    echo "快捷键:"
+    echo "  q 或 Ctrl+C  - 退出程序"
+    echo "  r            - 手动刷新"
+    echo "  p            - 暂停/继续"
+    echo "  s            - 切换排序方式"
+    echo "  f            - 切换过滤模式"
+    echo ""
+}
+
 # 主程序
 main() {
-+    show_welcome
-+
-+    # 检查命令行参数
-+    case "$1" in
-+        -h|--help)
-+            show_help
-+            exit 0
-+            ;;
-+    esac
-+
-+    # 执行检查步骤
-+    check_python
-+    check_uv
-+    check_config
-+    install_dependencies
-+    test_connections
-+
-+    # 启动监控
-+    start_monitor "$@"
-+}
-+
+    show_welcome
+
+    # 检查命令行参数
+    case "$1" in
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+    esac
+
+    # 执行检查步骤
+    check_python
+    check_uv
+    check_config
+    install_dependencies
+    # 跳过测试连接，直接启动
+    # test_connections
+
+    # 启动监控
+    start_monitor "$@"
+}
+
 # 执行主程序
 main "$@"

@@ -465,7 +465,7 @@ class MonitorApp(App[None]):
         if not target_conn:
             self.exit(1)
             return
-        await target_conn.close()
+        target_conn.close()
 
         # 初始化表结构
         target_tables = await self.initialize_tables_from_source_mysql()
@@ -479,11 +479,11 @@ class MonitorApp(App[None]):
         target_conn = await self.connect_target_mysql(self.target_config.databases[0])
         if target_conn:
             await self.get_target_mysql_rows_from_information_schema(target_conn, target_tables)
-            await target_conn.close()
+            target_conn.close()
             self.first_target_update = False
 
         self.source_iteration += 1
-        await self.update_source_mysql_counts(target_tables, use_information_schema=True)
+        await self.update_source_mysql_counts_async(target_tables, use_information_schema=True)
         self.first_source_update = False
 
         # 转换为列表格式
@@ -708,7 +708,10 @@ class MonitorApp(App[None]):
         # 按间隔更新源MySQL记录数
         if self.target_iteration % self.source_update_interval == 0:
             self.source_iteration += 1
+            print(f"📊 触发源表更新: target_iteration={self.target_iteration}, source_iteration={self.source_iteration}")
             await self.update_source_mysql_counts_async(target_tables, use_information_schema=False)
+        else:
+            print(f"⏭️ 跳过源表更新: target_iteration={self.target_iteration}, 将在第{self.source_update_interval - (self.target_iteration % self.source_update_interval)}次刷新时更新")
 
         # 更新进度跟踪数据
         self.update_progress_data(self.tables)
@@ -999,9 +1002,11 @@ class MonitorApp(App[None]):
             return False
 
         try:
-            mysql_conn = await self.connect_mysql(schema_name)
+            mysql_conn = await self.connect_source_mysql(schema_name)
             if not mysql_conn:
+                print(f"❌ 无法连接到源MySQL数据库: {schema_name}")
                 return False
+            print(f"✅ 成功连接到源MySQL数据库: {schema_name}")
 
             try:
                 if use_information_schema:
@@ -1033,20 +1038,23 @@ class MonitorApp(App[None]):
                             return False
 
                         async with self.mysql_update_lock:
-                            if table_info.mysql_updating:
+                            if table_info.source_updating:
+                                print(f"⏳ 表 {table_info.full_name} 正在更新中，跳过...")
                                 continue  # 如果正在更新中，跳过
 
-                            table_info.mysql_updating = True
-                            table_info.mysql_rows = 0  # 重置
+                            table_info.source_updating = True
+                            table_info.source_rows = 0  # 重置
+                            print(f"🔄 开始更新源表 {table_info.full_name} 的记录数...")
 
                             # 累加所有源表的估计行数
-                            for mysql_table_name in table_info.mysql_source_tables:
+                            for mysql_table_name in table_info.source_tables:
                                 if mysql_table_name in table_rows_map:
-                                    table_info.mysql_rows += table_rows_map[mysql_table_name]
+                                    table_info.source_rows += table_rows_map[mysql_table_name]
 
-                            table_info.mysql_last_updated = current_time
-                            table_info.mysql_updating = False
-                            table_info.mysql_is_estimated = True  # 标记为估计值
+                            table_info.source_last_updated = current_time
+                            table_info.source_updating = False
+                            table_info.source_is_estimated = True  # 标记为估计值
+                            print(f"✅ 完成更新源表 {table_info.full_name}: {table_info.source_rows} 条记录")
                 else:
                     # 常规更新使用精确的COUNT查询 - 优化显示逻辑
                     # 首先标记所有表为更新中状态
@@ -1069,7 +1077,7 @@ class MonitorApp(App[None]):
                         temp_mysql_rows = 0
 
                         # 更新所有源表的记录数
-                        for mysql_table_name in table_info.mysql_source_tables:
+                        for mysql_table_name in table_info.source_tables:
                             # 检查停止标志
                             if self.stop_event.is_set():
                                 async with self.mysql_update_lock:
@@ -1097,10 +1105,11 @@ class MonitorApp(App[None]):
 
                         # 查询完成后更新结果
                         async with self.mysql_update_lock:
-                            table_info.mysql_rows = temp_mysql_rows
-                            table_info.mysql_last_updated = current_time
-                            table_info.mysql_updating = False
-                            table_info.mysql_is_estimated = False  # 标记为精确值
+                            table_info.source_rows = temp_mysql_rows
+                            table_info.source_last_updated = current_time
+                            table_info.source_updating = False
+                            table_info.source_is_estimated = False  # 标记为精确值
+                            print(f"✅ 完成精确更新源表 {table_info.full_name}: {table_info.source_rows} 条记录")
 
                 return True
             finally:
@@ -1126,11 +1135,12 @@ class MonitorApp(App[None]):
             schema_updating = False
             async with self.mysql_update_lock:
                 for table_info in tables_dict.values():
-                    if table_info.mysql_updating:
+                    if table_info.source_updating:
                         schema_updating = True
                         break
 
             if not schema_updating:
+                print(f"🚀 提交源表更新任务: schema={schema_name}, 表数量={len(tables_dict)}")
                 future = asyncio.create_task(
                     self._update_single_schema_source_mysql(schema_name, tables_dict, use_information_schema))
                 self.mysql_update_tasks.append(future)
@@ -1261,7 +1271,7 @@ class MonitorApp(App[None]):
 
                 return True
             finally:
-                await conn.close()
+                conn.close()
 
         except Exception as e:
             # 出现异常时，标记所有表的target_updating为False
@@ -1292,6 +1302,10 @@ class MonitorApp(App[None]):
             if not schema_updating:
                 future = asyncio.create_task(self._update_single_schema_target_mysql(schema_name, tables_dict))
                 self.target_update_tasks.append(future)
+
+    async def update_target_mysql_counts_async(self, target_tables: Dict[str, Dict[str, TableInfo]]):
+        """异步更新目标MySQL记录数（不阻塞主线程）"""
+        await self.update_target_mysql_counts_exact(None, target_tables)
 
     async def update_target_mysql_counts(self, conn, target_tables: Dict[str, Dict[str, TableInfo]]):
         """更新目标MySQL记录数（同步版本，用于兼容性）"""
