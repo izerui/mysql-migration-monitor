@@ -3,12 +3,12 @@
 """
 MySQL vs MySQL 数据一致性监控工具 - Textual版本
 使用Textual框架提供现代化的TUI界面，支持DataTable滚动查看
-实时监控两个MySQL数据库之间的数据迁移状态，支持多数据库对比和表名一一对应映射。
+实时监控两个MySQL数据库之间的数据同步状态，支持多数据库对比和表名一一对应映射。
 """
 
 import argparse
 import asyncio
-import re
+
 import signal
 import sys
 from configparser import ConfigParser
@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
 
-import aiomysql
+
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Container, Vertical
@@ -162,12 +162,12 @@ class StatsWidget(Static):
 
         text.append("\n")
 
-        # 进度信息和迁移速度 - 带进度条和速度估算
+        # 进度信息和同步速度 - 带进度条和速度估算
         if total_source_rows > 0:
             completion_rate = min(total_target_rows / total_source_rows, 1.0)
             completion_percent = completion_rate * 100
 
-            text.append("📊 迁移进度: ", style="bold cyan")
+            text.append("📊 同步进度: ", style="bold cyan")
 
             # 创建进度条
             bar_width = 20
@@ -194,7 +194,7 @@ class StatsWidget(Static):
                 remaining = total_source_rows - total_target_rows
                 text.append(f" - 剩余: {remaining:,} 行", style="dim")
 
-                # 计算迁移速度和预估时间
+                # 计算同步速度和预估时间
                 if hasattr(self, 'parent_app') and self.parent_app:
                     speed = self.parent_app.calculate_migration_speed()
                     if speed > 0:
@@ -337,8 +337,7 @@ class MonitorApp(App[None]):
         table = self.query_one("#tables", DataTable)
         table.add_columns(
             "序号", "状态", "SCHEMA", "表名", "源行数",
-            "目标行数", "差异", "变化量", "目标更新",
-            "源更新"
+            "目标行数", "数量对比", "变化量", "目标更新", "源更新"
         )
 
         # 启动监控任务
@@ -457,64 +456,82 @@ class MonitorApp(App[None]):
         table.clear()
 
         for i, t in enumerate(sorted_tables, 1):
-            # 状态图标
+            # 状态图标 - 数据少用下箭头，数据多用上箭头，数据一致用对号
             if t.target_rows == -1 or t.source_rows == -1:
-                icon = "❌"
-            elif t.is_consistent:
-                icon = "✅"
+                icon = "❌️"
+            elif t.source_rows == t.target_rows:
+                icon = "✅"  # 数据一致
+            elif t.target_rows < t.source_rows:
+                icon = "⛔️"  # 数据少
+            elif t.target_rows > t.source_rows:
+                icon = "🈵"  # 数据多
             else:
                 icon = "⚠️"
 
-            # 数据差异文本和样式 - 零值与变化量保持一致
+            # 数量对比显示 - 数据少用下箭头，数据多用上箭头，数据一致用对号
             if t.target_rows == -1 or t.source_rows == -1:
-                diff_text = "[bold bright_red]ERROR[/]"  # 错误状态用亮红色
-            else:
-                # 根据差异大小和方向使用不同颜色
-                if t.data_diff < 0:
-                    diff_text = f"[bold orange3]{t.data_diff:+,}[/]"  # 负数用橙色（PG落后）
-                elif t.data_diff > 0:
-                    diff_text = f"[bold bright_green]{t.data_diff:+,}[/]"  # 正数用亮绿色（PG领先）
+                quantity_comparison = "[bold bright_red]❌️ 错误[/]"
+            elif t.source_rows == 0 and t.target_rows == 0:
+                quantity_comparison = "[green]✅ 空表一致[/]"
+            elif t.source_rows == t.target_rows:
+                quantity_comparison = "[green]✅ 完全一致[/]"
+            elif t.target_rows < t.source_rows:
+                missing = t.source_rows - t.target_rows
+                percent_missing = (missing / t.source_rows) * 100 if t.source_rows > 0 else 0
+                if percent_missing > 50:
+                    quantity_comparison = f"[red]⛔️ 严重不足 {missing:,}[/]"
+                elif percent_missing > 20:
+                    quantity_comparison = f"[orange3]⛔️ 缺少 {missing:,} ({percent_missing:.0f}%)[/]"
                 else:
-                    diff_text = "[dim white]0[/]"  # 零用暗白色（与变化量一致）
+                    quantity_comparison = f"[yellow3]⛔️ 略少 {missing:,} ({percent_missing:.0f}%)[/]"
+            else:
+                extra = t.target_rows - t.source_rows
+                percent_extra = (extra / t.source_rows) * 100 if t.source_rows > 0 else 0
+                if percent_extra > 100:
+                    quantity_comparison = f"[bright_blue]🈵 显著超出 {extra:,} (+{percent_extra:.0f}%)[/]"
+                elif percent_extra > 50:
+                    quantity_comparison = f"[bright_cyan]🈵 多余 {extra:,} (+{percent_extra:.0f}%)[/]"
+                else:
+                    quantity_comparison = f"[green]🈵 略多 {extra:,} (+{percent_extra:.0f}%)[/]"
 
             # 变化量文本和样式 - 去掉无变化时的横线
             if t.target_rows == -1:
                 change_text = "[bold bright_red]ERROR[/]"
             elif t.change > 0:
-                change_text = f"[bold spring_green3]+{t.change:,} ⬆[/]"  # 增加用春绿色
+                change_text = f"[bold spring_green3]+{t.change:,} 🈵[/]"  # 增加用春绿色
             elif t.change < 0:
-                change_text = f"[bold orange3]{t.change:,} ⬇[/]"  # 减少用橙色
+                change_text = f"[bold orange3]{t.change:,} ⛔️[/]"  # 减少用橙色
             else:
                 change_text = "[dim white]0[/]"  # 无变化只显示0，与数据差异保持一致
 
             # 源更新时间样式 - 与目标更新时间保持一致
             if t.source_updating:
-                source_status = "[yellow3]更新中[/]"  # 使用更温和的深黄色
+                source_time_display = "[yellow3]更新中[/]"  # 使用更温和的深黄色
             else:
                 source_relative_time = self.get_relative_time(t.source_last_updated)
                 if "年前" in source_relative_time or "个月前" in source_relative_time:
-                    source_status = f"[bold orange1]{source_relative_time}[/]"  # 很久没更新用橙色
+                    source_time_display = f"[bold orange1]{source_relative_time}[/]"  # 很久没更新用橙色
                 elif "天前" in source_relative_time:
-                    source_status = f"[bold yellow3]{source_relative_time}[/]"  # 几天前用深黄色
+                    source_time_display = f"[bold yellow3]{source_relative_time}[/]"  # 几天前用深黄色
                 elif "小时前" in source_relative_time:
-                    source_status = f"[bright cyan]{source_relative_time}[/]"  # 几小时前用亮青色
+                    source_time_display = f"[bright cyan]{source_relative_time}[/]"  # 几小时前用亮青色
                 else:
-                    source_status = f"[dim bright_black]{source_relative_time}[/]"  # 最近更新用暗色（与目标一致）
+                    source_time_display = f"[dim bright_black]{source_relative_time}[/]"  # 最近更新用暗色（与目标一致）
 
-            # 记录数显示和样式 - 区分估计值和精确值
+            # 记录数显示和样式 - 区分估计值和精确值，并添加数量对比指示
             if t.target_rows == -1:
                 target_rows_display = "[bold bright_red]ERROR[/]"
             elif t.target_is_estimated:
-                target_rows_display = f"[italic bright_blue]~{t.target_rows:,}[/]"  # 估计值用斜体亮蓝色
+                target_rows_display = f"[italic bright_blue]~{t.target_rows:,}[/]"
             else:
-                target_rows_display = f"[bold bright_cyan]{t.target_rows:,}[/]"  # 精确值用亮青色粗体
+                target_rows_display = f"[bold bright_cyan]{t.target_rows:,}[/]"
 
             if t.source_rows == -1:
                 source_rows_display = "[bold bright_red]ERROR[/]"
             elif t.source_is_estimated:
-                source_rows_display = f"[italic green3]~{t.source_rows:,}[/]"  # 估计值用斜体绿色
+                source_rows_display = f"[italic green3]~{t.source_rows:,}[/]"
             else:
-                source_rows_display = f"[bold bright_green]{t.source_rows:,}[/]"  # 精确值用亮绿色粗体
+                source_rows_display = f"[bold bright_green]{t.source_rows:,}[/]"
 
             # Schema名称和表名样式 - 使用更清晰的颜色
             schema_display = f"[bold medium_purple3]{t.schema_name[:12] + '...' if len(t.schema_name) > 15 else t.schema_name}[/]"  # Schema用中紫色
@@ -532,7 +549,7 @@ class MonitorApp(App[None]):
                 elif "小时前" in target_relative_time:
                     target_time_display = f"[bright cyan]{target_relative_time}[/]"  # 几小时前用亮青色
                 else:
-                    target_time_display = f"[dim bright_black]{target_relative_time}[/]"  # 最近更新用暗色
+                    target_time_display = f"[dim bright_black]{target_relative_time}[/]"  # 最近更新用暗色（与目标一致）
 
             # 源更新时间样式 - 使用原来MySQL更新时间的颜色方案
             if t.source_updating:
@@ -558,7 +575,7 @@ class MonitorApp(App[None]):
                 table_display,
                 source_rows_display,
                 target_rows_display,
-                diff_text,
+                quantity_comparison,
                 change_text,
                 target_time_display,
                 source_time_display
@@ -703,7 +720,7 @@ class MonitorApp(App[None]):
             self.history_data.pop(0)
 
     def calculate_migration_speed(self) -> float:
-        """计算迁移速度（记录/秒）"""
+        """计算同步速度（记录/秒）"""
         if len(self.history_data) < 2:
             return 0.0
 
@@ -724,7 +741,7 @@ class MonitorApp(App[None]):
         return total_change / time_span if time_span > 0 else 0.0
 
     def estimate_remaining_time(self, source_total: int, target_total: int, speed: float) -> str:
-        """估算剩余迁移时间"""
+        """估算剩余同步时间"""
         if speed <= 0 or source_total <= 0:
             return "无法估算"
 
@@ -857,7 +874,7 @@ class MonitorApp(App[None]):
             print(f"🔗 尝试连接源MySQL数据库: {schema_name}, host={self.source.host}, port={self.source.port}")
             mysql_conn = await self.source.connect(schema_name)
             if not mysql_conn:
-                print(f"❌ 无法连接到源MySQL数据库: {schema_name}")
+                print(f"❌️ 无法连接到源MySQL数据库: {schema_name}")
                 return False
             print(f"✅ 成功连接到源MySQL数据库: {schema_name}")
 
@@ -930,7 +947,7 @@ class MonitorApp(App[None]):
                             print(f"✅ 查询成功: {temp_mysql_rows} 行")
                         except Exception as e:
                             # 表可能不存在或无权限，跳过
-                            print(f"❌ 查询源表 {source_table_name} 失败: {str(e)}")
+                            print(f"❌️ 查询源表 {source_table_name} 失败: {str(e)}")
                             temp_mysql_rows = -1
 
                         # 查询完成后更新结果
@@ -1042,7 +1059,7 @@ class MonitorApp(App[None]):
             return False
 
         try:
-            conn = await self.source.connect(schema_name)
+            conn = await self.target.connect(schema_name)
             if not conn:
                 return False
 
@@ -1222,7 +1239,7 @@ def main():
     # 检查配置文件是否存在
     config_file = args.config
     if not Path(config_file).exists():
-        print(f"❌ 配置文件不存在: {config_file}")
+        print(f"❌️ 配置文件不存在: {config_file}")
         print("请确保config.ini文件存在并配置正确")
         sys.exit(1)
 
@@ -1231,7 +1248,7 @@ def main():
     if args.databases:
         override_databases = [db.strip() for db in args.databases.split(',') if db.strip()]
         if not override_databases:
-            print("❌ 指定的数据库列表为空")
+            print("❌️ 指定的数据库列表为空")
             sys.exit(1)
 
     app = MonitorApp(config_file, override_databases)
