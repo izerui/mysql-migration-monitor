@@ -5,7 +5,7 @@
 ## 快速开始
 
 ```bash
-./start_monitor.sh
+uv run app.py
 ```
 
 ## 功能特点
@@ -62,12 +62,3 @@ refresh_interval = 2
 1. **连接失败** - 检查 MySQL 服务状态
 2. **权限错误** - 确保用户有 SELECT 权限
 3. **超时** - 调整 refresh_interval
-
-## 项目结构
-
-```
-├── cdc_monitor.py      # 主程序
-├── config.ini         # 配置文件
-├── start_monitor.sh   # 启动脚本
-└── README.md         # 本文档
-```

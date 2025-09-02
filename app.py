@@ -25,7 +25,7 @@ from textual.timer import Timer
 from textual.widgets import DataTable, Footer, Header, Static
 
 
-from config_models import MySQLConfig, GlobConfig
+from config import MySQLConfig, GlobConfig
 
 
 @dataclass
