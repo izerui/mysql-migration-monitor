@@ -498,9 +498,9 @@ class MonitorApp(App[None]):
             if t.target_rows == -1:
                 change_text = "[bold bright_red]ERROR[/]"
             elif t.change > 0:
-                change_text = f"[bold spring_green3]+{t.change:,} 🈵[/]"  # 增加用春绿色
+                change_text = f"[bold spring_green3]+{t.change:,}[/]"  # 增加用春绿色
             elif t.change < 0:
-                change_text = f"[bold orange3]{t.change:,} ⛔️[/]"  # 减少用橙色
+                change_text = f"[bold orange3]{t.change:,}[/]"  # 减少用橙色
             else:
                 change_text = "[dim white]0[/]"  # 无变化只显示0，与数据差异保持一致
 
