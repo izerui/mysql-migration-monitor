@@ -468,8 +468,8 @@ class MonitorApp(App[None]):
         if target_conn:
             target_conn.close()
 
-        # 初始化表结构
-        target_tables = await self.initialize_tables_from_source()
+        # 初始化表结构（以目标数据库为准）
+        target_tables = await self.initialize_tables_from_target()
         total_tables = sum(len(tables_dict) for tables_dict in target_tables.values())
 
         if total_tables == 0:
@@ -930,8 +930,8 @@ class MonitorApp(App[None]):
         except Exception as e:
             return None
 
-    async def initialize_tables_from_source(self):
-        """从源MySQL初始化表结构，支持表映射关系"""
+    async def initialize_tables_from_target(self):
+        """从目标MySQL初始化表结构，以目标数据库的表为准"""
         schema_tables = {}
 
         for schema_name in self.monitor_config['databases']:
@@ -939,12 +939,13 @@ class MonitorApp(App[None]):
             if not schema_name:
                 continue
 
-            source_conn = await self.connect_source(schema_name)
-            if not source_conn:
+            # 先获取目标数据库的表结构
+            target_conn = await self.connect_target(schema_name)
+            if not target_conn:
                 continue
 
             try:
-                async with source_conn.cursor() as cursor:
+                async with target_conn.cursor() as cursor:
                     await cursor.execute("""
                                          SELECT TABLE_NAME
                                          FROM INFORMATION_SCHEMA.TABLES
@@ -952,39 +953,76 @@ class MonitorApp(App[None]):
                                            AND TABLE_TYPE = 'BASE TABLE'
                                          """, (schema_name,))
 
-                    source_table_names = []
+                    target_table_names = []
                     rows = await cursor.fetchall()
                     for row in rows:
                         table_name = row[0]
                         if not any(table_name.startswith(prefix.strip())
                                    for prefix in self.monitor_config['ignored_table_prefixes'] if prefix.strip()):
-                            source_table_names.append(table_name)
+                            target_table_names.append(table_name)
 
-                # 按目标表名分组
+                # 获取源数据库的表结构用于匹配
+                source_conn = await self.connect_source(schema_name)
+                source_table_names = []
+                if source_conn:
+                    try:
+                        async with source_conn.cursor() as cursor:
+                            await cursor.execute("""
+                                                 SELECT TABLE_NAME
+                                                 FROM INFORMATION_SCHEMA.TABLES
+                                                 WHERE TABLE_SCHEMA = %s
+                                                   AND TABLE_TYPE = 'BASE TABLE'
+                                                 """, (schema_name,))
+                            rows = await cursor.fetchall()
+                            for row in rows:
+                                table_name = row[0]
+                                if not any(table_name.startswith(prefix.strip())
+                                           for prefix in self.monitor_config['ignored_table_prefixes'] if prefix.strip()):
+                                    source_table_names.append(table_name)
+                    finally:
+                        source_conn.close()
+
+                # 创建目标表信息
                 target_tables = {}
-                for source_table_name in source_table_names:
-                    target_table_name = self.sync_props.get_target_table_name(source_table_name)
+                for target_table_name in target_table_names:
+                    current_time = datetime.now()
+                    target_tables[target_table_name] = TableInfo(
+                        schema_name=schema_name,
+                        target_table_name=target_table_name,
+                        target_rows=0,
+                        source_rows=0,
+                        source_last_updated=current_time - timedelta(days=365),
+                        target_last_updated=current_time - timedelta(days=365),
+                        last_updated=current_time
+                    )
 
-                    if target_table_name not in target_tables:
-                        current_time = datetime.now()
-                        target_tables[target_table_name] = TableInfo(
-                            schema_name=schema_name,
-                            target_table_name=target_table_name,
-                            target_rows=0,
-                            source_rows=0,
-                            source_last_updated=current_time - timedelta(days=365),
-                            target_last_updated=current_time - timedelta(days=365),
-                            last_updated=current_time
-                        )
+                    # 反向映射逻辑：先尝试直接匹配，再使用转换规则
+                    source_table_name = None
+
+                    # 1. 直接匹配：如果目标表名在源表中存在，直接使用
+                    if target_table_name in source_table_names:
+                        source_table_name = target_table_name
+                    else:
+                        # 2. 转换规则匹配：尝试将目标表名转换为可能的源表名
+                        # 这里需要实现反向映射逻辑，根据目标表名找到对应的源表名
+                        # 由于映射规则复杂，这里使用一个简单的方法：尝试所有可能的源表名转换
+                        for source_table in source_table_names:
+                            if self.sync_props.get_target_table_name(source_table) == target_table_name:
+                                source_table_name = source_table
+                                break
+
+                    # 如果找到了对应的源表名，添加到source_tables中
+                    if source_table_name:
                         target_tables[target_table_name].source_tables.append(source_table_name)
                     else:
-                        target_tables[target_table_name].source_tables.append(source_table_name)
+                        # 如果没有找到对应的源表，使用目标表名作为源表名（默认情况）
+                        target_tables[target_table_name].source_tables.append(target_table_name)
 
                 if target_tables:
                     schema_tables[schema_name] = target_tables
 
             finally:
-                source_conn.close()
+                target_conn.close()
 
         return schema_tables
 
