@@ -61,6 +61,7 @@ class TableInfo:
     target_updating: bool = False
     target_is_estimated: bool = False
     source_is_estimated: bool = False
+    pause_auto_refresh: bool = False  # 是否暂停自动刷新
 
     @property
     def change(self) -> int:
@@ -696,13 +697,20 @@ class MonitorApp(App[None]):
         if self.stop_event.is_set() or self.is_paused:
             return
 
-        # 重新构建target_tables结构用于更新
+        # 重新构建target_tables结构用于更新，跳过暂停自动刷新的表
         target_tables = {}
         for table_info in self.tables:
+            # 跳过暂停自动刷新的表
+            if table_info.pause_auto_refresh:
+                continue
             schema_name = table_info.schema_name
             if schema_name not in target_tables:
                 target_tables[schema_name] = {}
             target_tables[schema_name][table_info.target_table_name] = table_info
+
+        # 如果没有需要更新的表，直接返回
+        if not target_tables:
+            return
 
         # 更新目标MySQL记录数
         self.target_iteration += 1
@@ -728,6 +736,10 @@ class MonitorApp(App[None]):
 
     def action_refresh(self) -> None:
         """手动刷新"""
+        # 重置所有表的暂停状态
+        for table_info in self.tables:
+            table_info.pause_auto_refresh = False
+
         self.call_later(self.refresh_data)
 
     def action_toggle_pause(self) -> None:
@@ -1192,6 +1204,10 @@ class MonitorApp(App[None]):
                             table_info.source_updating = False
                             table_info.source_is_estimated = False  # 标记为精确值
 
+                            # 检查数据是否一致，如果一致则暂停自动刷新
+                            if table_info.is_consistent:
+                                table_info.pause_auto_refresh = True
+
                 return True
             finally:
                 source_conn.close()
@@ -1336,6 +1352,10 @@ class MonitorApp(App[None]):
                         table_info.target_rows = new_count
                         table_info.target_last_updated = current_time
                         table_info.target_is_estimated = False  # 标记为精确值
+
+                        # 检查数据是否一致，如果一致则暂停自动刷新
+                        if table_info.is_consistent:
+                            table_info.pause_auto_refresh = True
 
                     except Exception as e:
                         # 出现异常时标记为错误状态，记录数设为-1表示错误
