@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 """
-MySQL vs MySQL 数据一致性监控工具 - Textual版本
+MySQL vs MySQL 数据一致性监控工具 - Textual版本（支持表映射关系）
 使用Textual框架提供现代化的TUI界面，支持DataTable滚动查看
-实时监控两个MySQL数据库之间的数据同步状态，支持多数据库对比和表名一一对应映射。
+实时监控两个MySQL数据库之间的数据同步状态，支持表映射关系和多源表合并到目标表。
 """
 
 import argparse
 import asyncio
-
+import re
 import signal
 import sys
 from configparser import ConfigParser
@@ -17,7 +18,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
 
-
+import aiomysql
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Container, Vertical
@@ -25,30 +26,45 @@ from textual.timer import Timer
 from textual.widgets import DataTable, Footer, Header, Static
 
 
-from config import MySQLConfig, GlobConfig
+@dataclass
+class DatabaseConfig:
+    """数据库配置"""
+    host: str
+    port: int
+    database: str
+    username: str
+    password: str
+
+
+@dataclass
+class MySQLConfig(DatabaseConfig):
+    """MySQL配置"""
+    databases: List[str] = field(default_factory=list)
+    ignored_prefixes: List[str] = field(default_factory=list)
 
 
 @dataclass
 class TableInfo:
     """表信息"""
     schema_name: str
-    target_table_name: str  # 目标MySQL中的表名（内部使用）
-    source_rows: int = 0
+    target_table_name: str  # 目标MySQL中的表名
     target_rows: int = 0
-    previous_source_rows: int = 0
+    source_rows: int = 0
     previous_target_rows: int = 0
+    previous_source_rows: int = 0
+    source_tables: List[str] = field(default_factory=list)  # 源表列表
     last_updated: datetime = field(default_factory=datetime.now)
     source_last_updated: datetime = field(default_factory=datetime.now)
     target_last_updated: datetime = field(default_factory=datetime.now)
     is_first_query: bool = True
     source_updating: bool = False
     target_updating: bool = False
-    source_is_estimated: bool = False
     target_is_estimated: bool = False
+    source_is_estimated: bool = False
 
     @property
     def change(self) -> int:
-        """记录数变化"""
+        """目标记录数变化"""
         return 0 if self.is_first_query else self.target_rows - self.previous_target_rows
 
     @property
@@ -60,16 +76,108 @@ class TableInfo:
 
     @property
     def is_consistent(self) -> bool:
-        """检查数据是否一致"""
-        if self.target_rows == 0 and self.source_rows == 0:
-            return True
+        """数据是否一致"""
         return self.target_rows == self.source_rows
 
+    @property
     def full_name(self) -> str:
         """完整表名"""
         return f"{self.schema_name}.{self.target_table_name}"
 
 
+class SyncProperties:
+    """表名映射规则（与Java版本保持一致）"""
+
+    @staticmethod
+    def get_target_table_name(source_table_name: str) -> str:
+        """
+        生成目标表名
+        应用表名映射规则：table_runtime、table_uuid、table_数字 统一映射到 table
+        """
+        if not source_table_name or not source_table_name.strip():
+            return source_table_name
+
+        # 检查是否包含下划线
+        if '_' not in source_table_name:
+            return source_table_name  # 没有下划线，直接返回
+
+        # 1. 检查 runtime 后缀
+        if source_table_name.endswith('_runtime'):
+            return source_table_name[:-8]  # 移除 "_runtime"
+
+        # 2. 检查 9位数字后缀
+        last_underscore_index = source_table_name.rfind('_')
+        if last_underscore_index > 0:
+            suffix = source_table_name[last_underscore_index + 1:]
+            if SyncProperties._is_numeric_suffix(suffix):
+                return source_table_name[:last_underscore_index]
+
+        # 2a. 检查 9位数字_年度 格式
+        # 例如: order_bom_item_333367878_2018
+        if re.match(r'.*_\d{9}_\d{4}$', source_table_name):
+            return re.sub(r'_\d{9}_\d{4}$', '', source_table_name)
+
+        # 3. 检查各种UUID格式后缀
+        extracted_base_name = SyncProperties._extract_table_name_from_uuid(source_table_name)
+        if extracted_base_name != source_table_name:
+            return extracted_base_name
+
+        # 不符合映射规则，保持原样
+        return source_table_name
+
+    @staticmethod
+    def _is_numeric_suffix(s: str) -> bool:
+        """检查字符串是否为9位纯数字"""
+        if not s or not s.strip():
+            return False
+        return re.match(r'^\d{9}$', s) is not None
+
+    @staticmethod
+    def _extract_table_name_from_uuid(table_name: str) -> str:
+        """
+        从包含UUID的表名中提取基础表名
+        支持多种UUID格式：
+        1. order_bom_0e9b60a4_d6ed_473d_a326_9e8c8f744ec2 -> order_bom
+        2. users_a1b2c3d4-e5f6-7890-abcd-ef1234567890 -> users
+        3. products_a1b2c3d4e5f67890abcdef1234567890 -> products
+        """
+        if not table_name or '_' not in table_name:
+            return table_name
+
+        # 模式1: 下划线分隔的UUID格式 (8_4_4_4_12)
+        # 例如: order_bom_0e9b60a4_d6ed_473d_a326_9e8c8f744ec2
+        pattern1 = r'_[0-9a-fA-F]{8}_[0-9a-fA-F]{4}_[0-9a-fA-F]{4}_[0-9a-fA-F]{4}_[0-9a-fA-F]{12}$'
+        if re.search(pattern1, table_name):
+            return re.sub(pattern1, '', table_name)
+
+        # 模式2: 连字符分隔的UUID格式 (8-4-4-4-12)
+        # 例如: users_a1b2c3d4-e5f6-7890-abcd-ef1234567890
+        pattern2 = r'_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+        if re.search(pattern2, table_name):
+            return re.sub(pattern2, '', table_name)
+
+        # 模式3: 下划线分隔的UUID格式后跟年度 (8_4_4_4_12_年度)
+        # 例如: order_bom_item_05355967_c503_4a2d_9dd1_2dd7a9ffa15e_2030
+        pattern3 = r'_[0-9a-fA-F]{8}_[0-9a-fA-F]{4}_[0-9a-fA-F]{4}_[0-9a-fA-F]{4}_[0-9a-fA-F]{12}_\d{4}$'
+        if re.search(pattern3, table_name):
+            return re.sub(pattern3, '', table_name)
+
+        # 模式4: 混合格式 - 移除所有分隔符后检查是否为32位十六进制
+        parts = table_name.split('_')
+        if len(parts) >= 2:
+            # 从后往前组合，找到可能的UUID开始位置
+            for i in range(len(parts) - 1, 0, -1):
+                possible_uuid_parts = parts[i:]
+                possible_uuid = '_'.join(possible_uuid_parts)
+                clean_uuid = re.sub(r'[-_]', '', possible_uuid)
+
+                if len(clean_uuid) == 32 and re.match(r'^[0-9a-fA-F]{32}$', clean_uuid):
+                    # 找到了UUID，返回基础表名
+                    return '_'.join(parts[:i])
+                elif len(clean_uuid) > 32:
+                    break  # 太长了，不可能是UUID
+
+        return table_name  # 没有找到UUID模式，返回原表名
 
 
 class StatsWidget(Static):
@@ -79,7 +187,7 @@ class StatsWidget(Static):
         super().__init__(**kwargs)
 
     def update_stats(self, tables: List[TableInfo], target_iteration: int, source_iteration: int, start_time: datetime,
-                    is_paused: bool = False, sort_by: str = "schema_table", filter_mode: str = "all"):
+                     is_paused: bool = False, sort_by: str = "schema_table", filter_mode: str = "all"):
         """更新统计数据"""
         # 过滤掉错误状态的表进行统计
         valid_tables = [t for t in tables if t.target_rows != -1 and t.source_rows != -1]
@@ -196,10 +304,11 @@ class StatsWidget(Static):
 
                 # 计算同步速度和预估时间
                 if hasattr(self, 'parent_app') and self.parent_app:
-                    speed = self.parent_app.calculate_migration_speed()
+                    speed = self.parent_app.calculate_sync_speed()
                     if speed > 0:
                         text.append(f" - 速度: {speed:.1f} 行/秒", style="bright_blue")
-                        estimated_time = self.parent_app.estimate_remaining_time(total_source_rows, total_target_rows, speed)
+                        estimated_time = self.parent_app.estimate_remaining_time(total_source_rows, total_target_rows,
+                                                                                 speed)
                         text.append(f" - 预估: {estimated_time}", style="bright_blue")
                     else:
                         text.append(" - 速度: 计算中...", style="dim")
@@ -276,28 +385,28 @@ class MonitorApp(App[None]):
         super().__init__()
         self.config_file = config_file
         self.override_databases = override_databases
-        self.source: Optional[MySQLConfig] = None
-        self.target: Optional[MySQLConfig] = None
-        self.global_config: Optional[GlobConfig] = None
+        self.source_config = None
+        self.target_config = None
+        self.monitor_config = {}
         self.tables: List[TableInfo] = []
-        self.iteration = 0
+        self.sync_props = SyncProperties()
         self.start_time = datetime.now()
 
         # 分离的更新计数器
-        self.source_iteration = 0
         self.target_iteration = 0
+        self.source_iteration = 0
         self.source_update_interval = 3
         self.first_source_update = True
         self.first_target_update = True
-        self.source_updating = False
         self.target_updating = False
+        self.source_updating = False
 
         # 停止标志，用于优雅退出
         self.stop_event = asyncio.Event()
 
         # 异步更新支持
-        self.mysql_update_lock = asyncio.Lock()
-        self.mysql_update_tasks = []
+        self.source_update_lock = asyncio.Lock()
+        self.source_update_tasks = []
         self.target_update_lock = asyncio.Lock()
         self.target_update_tasks = []
 
@@ -323,7 +432,9 @@ class MonitorApp(App[None]):
 
         with Vertical():
             # 统计信息面板
-            yield StatsWidget(classes="stats")
+            stats_widget = StatsWidget(classes="stats")
+            stats_widget.parent_app = self  # 传递app实例引用
+            yield stats_widget
 
             # 数据表格容器
             with Container(classes="data-table"):
@@ -336,8 +447,8 @@ class MonitorApp(App[None]):
         # 设置数据表格
         table = self.query_one("#tables", DataTable)
         table.add_columns(
-            "序号", "状态", "SCHEMA", "表名", "源行数",
-            "目标行数", "数量对比", "变化量", "目标更新", "源更新"
+            "序号", "状态", "SCHEMA", "目标表名", "目标行数",
+            "源汇总数", "数据差异", "变化量", "目标更新", "源更新", "源表数量"
         )
 
         # 启动监控任务
@@ -350,37 +461,34 @@ class MonitorApp(App[None]):
             return
 
         # 初始化数据库连接测试
-        target_conn = await self.target.connect(self.global_config.databases[0])
+        target_conn = await self.connect_target(self.monitor_config['databases'][0])
         if not target_conn:
             self.exit(1)
             return
-        target_conn.close()
+        if target_conn:
+            target_conn.close()
 
         # 初始化表结构
-        target_tables = await self.initialize_tables_from_source_mysql()
+        target_tables = await self.initialize_tables_from_source()
         total_tables = sum(len(tables_dict) for tables_dict in target_tables.values())
 
         if total_tables == 0:
             self.exit(1)
             return
 
-        # 第一次数据更新 - 使用目标数据库获取表行数
-        target_conn = await self.target.connect(self.global_config.databases[0])
+        # 第一次数据更新
+        target_conn = await self.connect_target(self.monitor_config['databases'][0])
         if target_conn:
-            try:
-                for schema_name, tables_dict in target_tables.items():
-                    for table_name, table_info in tables_dict.items():
-                        estimated_rows = await self.target.get_table_rows_from_information_schema(
-                            target_conn, schema_name, table_name
-                        )
-                        table_info.target_rows = max(0, estimated_rows)
-                        table_info.target_last_updated = datetime.now()
-            finally:
-                target_conn.close()
+            await self.get_target_rows_from_information_schema(target_conn, target_tables)
+            if target_conn is not None and hasattr(target_conn, 'closed') and not target_conn.closed:
+                try:
+                    await target_conn.close()
+                except Exception as e:
+                    print(f"关闭连接时出错: {e}")
             self.first_target_update = False
 
         self.source_iteration += 1
-        await self.update_source_mysql_counts_async(target_tables, use_information_schema=True)
+        await self.update_source_counts(target_tables, use_information_schema=True)
         self.first_source_update = False
 
         # 转换为列表格式
@@ -393,14 +501,13 @@ class MonitorApp(App[None]):
         self.update_display()
 
         # 启动定时刷新
-        refresh_interval = self.global_config.refresh_interval
+        refresh_interval = self.monitor_config.get('refresh_interval', 3)
         self.refresh_timer = self.set_interval(refresh_interval, self.refresh_data)
 
     def update_display(self):
         """更新显示内容"""
         # 更新统计信息
         stats_widget = self.query_one(StatsWidget)
-        stats_widget.parent_app = self  # 传递app实例引用
         stats_widget.update_stats(
             self.tables,
             self.target_iteration,
@@ -456,69 +563,64 @@ class MonitorApp(App[None]):
         table.clear()
 
         for i, t in enumerate(sorted_tables, 1):
-            # 状态图标 - 数据少用下箭头，数据多用上箭头，数据一致用对号
+            # 状态图标
             if t.target_rows == -1 or t.source_rows == -1:
-                icon = "❌️"
-            elif t.source_rows == t.target_rows:
-                icon = "✅"  # 数据一致
-            elif t.target_rows < t.source_rows:
-                icon = "⛔️"  # 数据少
-            elif t.target_rows > t.source_rows:
-                icon = "🈵"  # 数据多
+                icon = "❌"
+            elif t.is_consistent:
+                icon = "✅"
             else:
                 icon = "⚠️"
 
-            # 数量对比显示 - 数据少用下箭头，数据多用上箭头，数据一致用对号
+            # 数据差异文本和样式
             if t.target_rows == -1 or t.source_rows == -1:
-                quantity_comparison = "[bold bright_red]❌️ 错误[/]"
-            elif t.source_rows == 0 and t.target_rows == 0:
-                quantity_comparison = "[green]✅ 空表一致[/]"
-            elif t.source_rows == t.target_rows:
-                quantity_comparison = "[green]✅ 完全一致[/]"
-            elif t.target_rows < t.source_rows:
-                missing = t.source_rows - t.target_rows
-                percent_missing = (missing / t.source_rows) * 100 if t.source_rows > 0 else 0
-                if percent_missing > 50:
-                    quantity_comparison = f"[red]⛔️ 严重不足 {missing:,}[/]"
-                elif percent_missing > 20:
-                    quantity_comparison = f"[orange3]⛔️ 缺少 {missing:,} ({percent_missing:.0f}%)[/]"
-                else:
-                    quantity_comparison = f"[yellow3]⛔️ 略少 {missing:,} ({percent_missing:.0f}%)[/]"
+                diff_text = "[bold bright_red]ERROR[/]"
             else:
-                extra = t.target_rows - t.source_rows
-                percent_extra = (extra / t.source_rows) * 100 if t.source_rows > 0 else 0
-                if percent_extra > 100:
-                    quantity_comparison = f"[bright_blue]🈵 显著超出 {extra:,} (+{percent_extra:.0f}%)[/]"
-                elif percent_extra > 50:
-                    quantity_comparison = f"[bright_cyan]🈵 多余 {extra:,} (+{percent_extra:.0f}%)[/]"
+                if t.data_diff < 0:
+                    diff_text = f"[bold orange3]{t.data_diff:+,}[/]"
+                elif t.data_diff > 0:
+                    diff_text = f"[bold bright_green]{t.data_diff:+,}[/]"
                 else:
-                    quantity_comparison = f"[green]🈵 略多 {extra:,} (+{percent_extra:.0f}%)[/]"
+                    diff_text = "[dim white]0[/]"
 
-            # 变化量文本和样式 - 去掉无变化时的横线
+            # 变化量文本和样式
             if t.target_rows == -1:
                 change_text = "[bold bright_red]ERROR[/]"
             elif t.change > 0:
-                change_text = f"[bold spring_green3]+{t.change:,}[/]"  # 增加用春绿色
+                change_text = f"[bold spring_green3]+{t.change:,} ⬆[/]"
             elif t.change < 0:
-                change_text = f"[bold orange3]{t.change:,}[/]"  # 减少用橙色
+                change_text = f"[bold orange3]{t.change:,} ⬇[/]"
             else:
-                change_text = "[dim white]0[/]"  # 无变化只显示0，与数据差异保持一致
+                change_text = "[dim white]0[/]"
 
-            # 源更新时间样式 - 与目标更新时间保持一致
+            # 目标更新时间样式
+            if t.target_updating:
+                target_time_display = "[yellow3]更新中[/]"
+            else:
+                target_relative_time = self.get_relative_time(t.target_last_updated)
+                if "年前" in target_relative_time or "个月前" in target_relative_time:
+                    target_time_display = f"[bold orange1]{target_relative_time}[/]"
+                elif "天前" in target_relative_time:
+                    target_time_display = f"[bold yellow3]{target_relative_time}[/]"
+                elif "小时前" in target_relative_time:
+                    target_time_display = f"[bright_cyan]{target_relative_time}[/]"
+                else:
+                    target_time_display = f"[dim bright_black]{target_relative_time}[/]"
+
+            # 源更新时间样式
             if t.source_updating:
-                source_time_display = "[yellow3]更新中[/]"  # 使用更温和的深黄色
+                source_time_display = "[yellow3]更新中[/]"
             else:
                 source_relative_time = self.get_relative_time(t.source_last_updated)
                 if "年前" in source_relative_time or "个月前" in source_relative_time:
-                    source_time_display = f"[bold orange1]{source_relative_time}[/]"  # 很久没更新用橙色
+                    source_time_display = f"[bold orange1]{source_relative_time}[/]"
                 elif "天前" in source_relative_time:
-                    source_time_display = f"[bold yellow3]{source_relative_time}[/]"  # 几天前用深黄色
+                    source_time_display = f"[bold yellow3]{source_relative_time}[/]"
                 elif "小时前" in source_relative_time:
-                    source_time_display = f"[bright cyan]{source_relative_time}[/]"  # 几小时前用亮青色
+                    source_time_display = f"[bright_cyan]{source_relative_time}[/]"
                 else:
-                    source_time_display = f"[dim bright_black]{source_relative_time}[/]"  # 最近更新用暗色（与目标一致）
+                    source_time_display = f"[dim bright_black]{source_relative_time}[/]"
 
-            # 记录数显示和样式 - 区分估计值和精确值，并添加数量对比指示
+            # 记录数显示和样式
             if t.target_rows == -1:
                 target_rows_display = "[bold bright_red]ERROR[/]"
             elif t.target_is_estimated:
@@ -533,39 +635,20 @@ class MonitorApp(App[None]):
             else:
                 source_rows_display = f"[bold bright_green]{t.source_rows:,}[/]"
 
-            # Schema名称和表名样式 - 使用更清晰的颜色
-            schema_display = f"[bold medium_purple3]{t.schema_name[:12] + '...' if len(t.schema_name) > 15 else t.schema_name}[/]"  # Schema用中紫色
-            table_display = f"[bold dodger_blue2]{t.target_table_name[:35] + '...' if len(t.target_table_name) > 38 else t.target_table_name}[/]"  # 表名用道奇蓝色
+            # Schema名称和表名样式
+            schema_display = f"[bold medium_purple3]{t.schema_name[:12] + '...' if len(t.schema_name) > 15 else t.schema_name}[/]"
+            table_display = f"[bold dodger_blue2]{t.target_table_name[:35] + '...' if len(t.target_table_name) > 38 else t.target_table_name}[/]"
 
-            # 目标更新时间样式 - 区分更新状态，使用更温和的颜色
-            if t.target_updating:
-                target_time_display = "[yellow3]更新中[/]"  # 使用更温和的深黄色
+            # 源表数量样式
+            source_count = len(t.source_tables)
+            if source_count >= 5:
+                source_count_display = f"[bold orange1]{source_count}[/]"
+            elif source_count >= 3:
+                source_count_display = f"[bold yellow3]{source_count}[/]"
+            elif source_count >= 2:
+                source_count_display = f"[bright_cyan]{source_count}[/]"
             else:
-                target_relative_time = self.get_relative_time(t.last_updated)
-                if "年前" in target_relative_time or "个月前" in target_relative_time:
-                    target_time_display = f"[bold orange1]{target_relative_time}[/]"  # 很久没更新用橙色
-                elif "天前" in target_relative_time:
-                    target_time_display = f"[bold yellow3]{target_relative_time}[/]"  # 几天前用深黄色
-                elif "小时前" in target_relative_time:
-                    target_time_display = f"[bright cyan]{target_relative_time}[/]"  # 几小时前用亮青色
-                else:
-                    target_time_display = f"[dim bright_black]{target_relative_time}[/]"  # 最近更新用暗色（与目标一致）
-
-            # 源更新时间样式 - 使用原来MySQL更新时间的颜色方案
-            if t.source_updating:
-                source_time_display = "[yellow3]更新中[/]"  # 使用更温和的深黄色
-            else:
-                source_relative_time = self.get_relative_time(t.source_last_updated)
-                if "年前" in source_relative_time or "个月前" in source_relative_time:
-                    source_time_display = f"[bold orange1]{source_relative_time}[/]"  # 很久没更新用橙色
-                elif "天前" in source_relative_time:
-                    source_time_display = f"[bold yellow3]{source_relative_time}[/]"  # 几天前用深黄色
-                elif "小时前" in source_relative_time:
-                    source_time_display = f"[bright cyan]{source_relative_time}[/]"  # 几小时前用亮青色
-                else:
-                    source_time_display = f"[dim bright_black]{source_relative_time}[/]"  # 最近更新用暗色
-
-
+                source_count_display = f"[dim bright_white]{source_count}[/]"
 
             # 添加行到表格
             table.add_row(
@@ -573,12 +656,13 @@ class MonitorApp(App[None]):
                 icon,
                 schema_display,
                 table_display,
-                source_rows_display,
                 target_rows_display,
-                quantity_comparison,
+                source_rows_display,
+                diff_text,
                 change_text,
                 target_time_display,
-                source_time_display
+                source_time_display,
+                source_count_display
             )
 
         # 尝试恢复光标位置和滚动位置
@@ -622,15 +706,12 @@ class MonitorApp(App[None]):
 
         # 更新目标MySQL记录数
         self.target_iteration += 1
-        await self.update_target_mysql_counts_async(target_tables)
+        await self.update_target_counts_async(target_tables)
 
         # 按间隔更新源MySQL记录数
         if self.target_iteration % self.source_update_interval == 0:
             self.source_iteration += 1
-            print(f"📊 触发源表更新: target_iteration={self.target_iteration}, source_iteration={self.source_iteration}")
-            await self.update_source_mysql_counts_async(target_tables, use_information_schema=False)
-        else:
-            print(f"⏭️ 跳过源表更新: target_iteration={self.target_iteration}, 将在第{self.source_update_interval - (self.target_iteration % self.source_update_interval)}次刷新时更新")
+            await self.update_source_counts_async(target_tables, use_information_schema=False)
 
         # 更新进度跟踪数据
         self.update_progress_data(self.tables)
@@ -719,7 +800,7 @@ class MonitorApp(App[None]):
         if len(self.history_data) > self.max_history_points:
             self.history_data.pop(0)
 
-    def calculate_migration_speed(self) -> float:
+    def calculate_sync_speed(self) -> float:
         """计算同步速度（记录/秒）"""
         if len(self.history_data) < 2:
             return 0.0
@@ -777,79 +858,127 @@ class MonitorApp(App[None]):
             config = ConfigParser()
             config.read(config_path, encoding='utf-8')
 
-            # 读取全局数据库配置
-            if self.override_databases:
-                databases_list = self.override_databases
-            else:
-                global_section = config['global']
-                databases_list = [db.strip() for db in global_section['databases'].split(',')]
-
             # 源数据库 MySQL 配置
-            mysql_source_section = config['source']
-            self.source = MySQLConfig(
-                host=mysql_source_section['host'],
-                port=int(mysql_source_section['port']),
-                username=mysql_source_section['username'],
-                password=mysql_source_section['password']
+            source_section = config['source']
+            self.source_config = MySQLConfig(
+                host=source_section['host'],
+                port=int(source_section['port']),
+                database="",
+                username=source_section['username'],
+                password=source_section['password']
             )
 
             # 目标数据库 MySQL 配置
-            mysql_target_section = config['target']
-            self.target = MySQLConfig(
-                host=mysql_target_section['host'],
-                port=int(mysql_target_section['port']),
-                username=mysql_target_section['username'],
-                password=mysql_target_section['password']
+            target_section = config['target']
+            self.target_config = MySQLConfig(
+                host=target_section['host'],
+                port=int(target_section['port']),
+                database="",
+                username=target_section['username'],
+                password=target_section['password']
             )
 
-            # 全局配置
-            global_section = config['global']
-            self.global_config = GlobConfig(
-                databases=databases_list,
-                refresh_interval=int(global_section.get('refresh_interval', 3))
-            )
+            # 监控配置
+            monitor_section = config['monitor']
+            if self.override_databases:
+                databases_list = self.override_databases
+            else:
+                databases_list = [db.strip() for db in monitor_section['databases'].split(',')]
+
+            self.monitor_config = {
+                'databases': databases_list,
+                'refresh_interval': int(monitor_section.get('refresh_interval', 3)),
+                'source_update_interval': int(monitor_section.get('source_update_interval', 3)),
+                'ignored_table_prefixes': monitor_section.get('ignored_table_prefixes', '').split(',')
+            }
+
+            self.source_update_interval = self.monitor_config['source_update_interval']
             return True
 
         except Exception as e:
             return False
 
+    async def connect_source(self, database: str):
+        """连接源MySQL"""
+        try:
+            conn = await aiomysql.connect(
+                host=self.source_config.host,
+                port=self.source_config.port,
+                db=database,
+                user=self.source_config.username,
+                password=self.source_config.password,
+                connect_timeout=5,
+                charset='utf8mb4'
+            )
+            return conn
+        except Exception as e:
+            return None
 
+    async def connect_target(self, database: str):
+        """连接目标MySQL"""
+        try:
+            conn = await aiomysql.connect(
+                host=self.target_config.host,
+                port=self.target_config.port,
+                db=database,
+                user=self.target_config.username,
+                password=self.target_config.password,
+                connect_timeout=5,
+                charset='utf8mb4'
+            )
+            return conn
+        except Exception as e:
+            return None
 
-
-
-    async def initialize_tables_from_source_mysql(self):
-        """从源MySQL初始化表结构"""
+    async def initialize_tables_from_source(self):
+        """从源MySQL初始化表结构，支持表映射关系"""
         schema_tables = {}
 
-        for schema_name in self.global_config.databases:
+        for schema_name in self.monitor_config['databases']:
             schema_name = schema_name.strip()
             if not schema_name:
                 continue
 
-            source_conn = await self.source.connect(schema_name)
+            source_conn = await self.connect_source(schema_name)
             if not source_conn:
                 continue
 
             try:
-                # 使用 MySQLConfig 的方法获取表列表
-                source_table_names = await self.source.get_tables_from_schema(source_conn, schema_name)
+                async with source_conn.cursor() as cursor:
+                    await cursor.execute("""
+                                         SELECT TABLE_NAME
+                                         FROM INFORMATION_SCHEMA.TABLES
+                                         WHERE TABLE_SCHEMA = %s
+                                           AND TABLE_TYPE = 'BASE TABLE'
+                                         """, (schema_name,))
+
+                    source_table_names = []
+                    rows = await cursor.fetchall()
+                    for row in rows:
+                        table_name = row[0]
+                        if not any(table_name.startswith(prefix.strip())
+                                   for prefix in self.monitor_config['ignored_table_prefixes'] if prefix.strip()):
+                            source_table_names.append(table_name)
 
                 # 按目标表名分组
                 target_tables = {}
                 for source_table_name in source_table_names:
-                    target_table_name = source_table_name
+                    target_table_name = self.sync_props.get_target_table_name(source_table_name)
 
                     if target_table_name not in target_tables:
                         current_time = datetime.now()
                         target_tables[target_table_name] = TableInfo(
                             schema_name=schema_name,
                             target_table_name=target_table_name,
-                            source_rows=0,
                             target_rows=0,
+                            source_rows=0,
                             source_last_updated=current_time - timedelta(days=365),
                             target_last_updated=current_time - timedelta(days=365),
                             last_updated=current_time
                         )
+                        target_tables[target_table_name].source_tables.append(source_table_name)
+                    else:
+                        target_tables[target_table_name].source_tables.append(source_table_name)
 
                 if target_tables:
                     schema_tables[schema_name] = target_tables
@@ -859,146 +988,7 @@ class MonitorApp(App[None]):
 
         return schema_tables
 
-
-
-    async def _update_single_schema_source_mysql(self, schema_name: str, tables_dict: Dict[str, TableInfo],
-                                          use_information_schema: bool = False) -> bool:
-        """更新单个schema的MySQL记录数（异步版本，支持中断）"""
-        current_time = datetime.now()
-
-        # 检查是否收到停止信号
-        if self.stop_event.is_set():
-            return False
-
-        try:
-            print(f"🔗 尝试连接源MySQL数据库: {schema_name}, host={self.source.host}, port={self.source.port}")
-            mysql_conn = await self.source.connect(schema_name)
-            if not mysql_conn:
-                print(f"❌️ 无法连接到源MySQL数据库: {schema_name}")
-                return False
-            print(f"✅ 成功连接到源MySQL数据库: {schema_name}")
-
-            try:
-                if use_information_schema:
-                    # 检查停止标志
-                    if self.stop_event.is_set():
-                        return False
-
-                    # 使用 MySQLConfig 的方法批量获取表行数
-                    for table_info in tables_dict.values():
-                        # 检查停止标志
-                        if self.stop_event.is_set():
-                            return False
-
-                        async with self.mysql_update_lock:
-                            if table_info.source_updating:
-                                print(f"⏳ 表 {table_info.full_name} 正在更新中，跳过...")
-                                continue  # 如果正在更新中，跳过
-
-                            table_info.source_updating = True
-                            table_info.source_rows = 0  # 重置
-                            print(f"🔄 开始更新源表 {table_info.full_name} 的记录数...")
-
-                        # 获取源表的估计行数
-                        source_table_name = table_info.target_table_name
-                        estimated_rows = await self.source.get_table_rows_from_information_schema(
-                            mysql_conn, schema_name, source_table_name
-                        )
-
-                        async with self.mysql_update_lock:
-                            table_info.source_rows = estimated_rows
-                            table_info.source_last_updated = current_time
-                            table_info.source_updating = False
-                            table_info.source_is_estimated = True  # 标记为估计值
-                            print(f"✅ 完成更新源表 {table_info.full_name}: {table_info.source_rows} 条记录")
-                else:
-                    # 常规更新使用精确的COUNT查询 - 优化显示逻辑
-                    # 首先标记所有表为更新中状态
-                    async with self.mysql_update_lock:
-                        for table_info in tables_dict.values():
-                            if not table_info.source_updating:
-                                table_info.source_updating = True
-
-                    # 然后逐个处理表
-                    for table_info in tables_dict.values():
-                        # 检查停止标志
-                        if self.stop_event.is_set():
-                            # 恢复所有表的状态
-                            async with self.mysql_update_lock:
-                                for ti in tables_dict.values():
-                                    ti.source_updating = False
-                            return False
-
-                        # 获取源表名称
-                        source_table_name = table_info.target_table_name
-
-                        # 更新源表的记录数
-                        if self.stop_event.is_set():
-                            async with self.mysql_update_lock:
-                                for ti in tables_dict.values():
-                                    ti.source_updating = False
-                            return False
-
-                        try:
-                            print(f"🔍 正在查询源表 {source_table_name} 的记录数...")
-                            temp_mysql_rows = await self.source.get_table_rows_count(
-                                mysql_conn, source_table_name
-                            )
-                            print(f"✅ 查询成功: {temp_mysql_rows} 行")
-                        except Exception as e:
-                            # 表可能不存在或无权限，跳过
-                            print(f"❌️ 查询源表 {source_table_name} 失败: {str(e)}")
-                            temp_mysql_rows = -1
-
-                        # 查询完成后更新结果
-                        async with self.mysql_update_lock:
-                            old_rows = table_info.source_rows
-                            table_info.source_rows = temp_mysql_rows
-                            table_info.source_last_updated = current_time
-                            table_info.source_updating = False
-                            table_info.source_is_estimated = False  # 标记为精确值
-                            print(f"✅ 完成精确更新源表 {table_info.full_name}: {old_rows} -> {table_info.source_rows} 条记录")
-
-                return True
-            finally:
-                mysql_conn.close()
-
-        except Exception as e:
-            # 出现异常时，标记所有表的source_updating为False
-            async with self.mysql_update_lock:
-                for table_info in tables_dict.values():
-                    table_info.source_updating = False
-            return False
-
-    async def update_source_mysql_counts_async(self, target_tables: Dict[str, Dict[str, TableInfo]],
-                                        use_information_schema: bool = False):
-        """异步更新源MySQL记录数（不阻塞主线程）"""
-        # 清理已完成的任务
-        self.mysql_update_tasks = [f for f in self.mysql_update_tasks if not f.done()]
-
-        # 为每个schema提交异步更新任务
-        for schema_name, tables_dict in target_tables.items():
-            # 检查该schema是否已经有正在进行的更新任务
-            schema_updating = False
-            async with self.mysql_update_lock:
-                for table_info in tables_dict.values():
-                    if table_info.source_updating:
-                        schema_updating = True
-                        break
-
-            if not schema_updating:
-                print(f"🚀 提交源表更新任务: schema={schema_name}, 表数量={len(tables_dict)}")
-                future = asyncio.create_task(
-                    self._update_single_schema_source_mysql(schema_name, tables_dict, use_information_schema))
-                self.mysql_update_tasks.append(future)
-
-    async def update_source_mysql_counts(self, conn, target_tables: Dict[str, Dict[str, TableInfo]],
-                                  use_information_schema: bool = False):
-        """更新源MySQL记录数（同步版本，用于兼容性）"""
-        for schema_name, tables_dict in target_tables.items():
-            await self._update_single_schema_source_mysql(schema_name, tables_dict, use_information_schema)
-
-
+    async def get_target_rows_from_information_schema(self, conn, target_tables: Dict[str, Dict[str, TableInfo]]):
         """第一次运行时使用information_schema快速获取目标MySQL表行数估计值"""
         current_time = datetime.now()
         self.target_updating = True
@@ -1006,27 +996,36 @@ class MonitorApp(App[None]):
         try:
             for schema_name, tables_dict in target_tables.items():
                 try:
+                    # 检查连接是否有效
+                    if conn is None or not hasattr(conn, 'closed') or conn.closed:
+                        return
+
                     # 一次性获取该schema下所有表的统计信息
                     async with conn.cursor() as cursor:
                         await cursor.execute("""
-                            SELECT TABLE_NAME, TABLE_ROWS
-                            FROM INFORMATION_SCHEMA.TABLES
-                            WHERE TABLE_SCHEMA = %s
-                        """, (schema_name,))
+                                             SELECT TABLE_NAME, TABLE_ROWS
+                                             FROM INFORMATION_SCHEMA.TABLES
+                                             WHERE TABLE_SCHEMA = %s
+                                               AND TABLE_TYPE = 'BASE TABLE'
+                                             """, (schema_name,))
 
-                        rows = await cursor.fetchall()
+                        # 建立表名到估计行数的映射
                         target_stats_map = {}
+                        rows = await cursor.fetchall()
                         for row in rows:
-                            table_name, estimated_rows = row[0], row[1]
-                            target_stats_map[table_name] = max(0, estimated_rows or 0)  # 确保非负数
+                            table_name, table_rows = row[0], row[1]
+                            target_stats_map[table_name] = max(0, table_rows or 0)  # 处理NULL值
 
-                    # 更新TableInfo
+                    # 更新TableInfo中的目标行数
                     for target_table_name, table_info in tables_dict.items():
                         if target_table_name in target_stats_map:
                             new_count = target_stats_map[target_table_name]
                         else:
                             # 如果统计信息中没有，可能是新表或无数据，使用精确查询
                             try:
+                                # 再次检查连接状态
+                                if conn is None or not hasattr(conn, 'closed') or conn.closed:
+                                    continue
                                 async with conn.cursor() as cursor:
                                     await cursor.execute(f"SELECT COUNT(*) FROM `{schema_name}`.`{target_table_name}`")
                                     result = await cursor.fetchone()
@@ -1041,16 +1040,160 @@ class MonitorApp(App[None]):
                             table_info.is_first_query = False
 
                         table_info.target_rows = new_count
-                        table_info.last_updated = current_time
+                        table_info.target_last_updated = current_time
                         table_info.target_is_estimated = True  # 标记为估计值
 
                 except Exception as e:
                     # 如果information_schema查询失败，回退到逐表精确查询
-                    await self.update_target_mysql_counts(conn, {schema_name: tables_dict})
+                    if conn is not None and hasattr(conn, 'closed') and not conn.closed:
+                        await self.update_target_counts(conn, {schema_name: tables_dict})
+        except Exception as e:
+            # 捕获方法级别的异常，防止连接对象被破坏
+            print(f"get_target_rows_from_information_schema 异常: {e}")
         finally:
             self.target_updating = False
 
-    async def _update_single_schema_target_mysql(self, schema_name: str, tables_dict: Dict[str, TableInfo]) -> bool:
+    async def _update_single_schema_source(self, schema_name: str, tables_dict: Dict[str, TableInfo],
+                                           use_information_schema: bool = False) -> bool:
+        """更新单个schema的源MySQL记录数（异步版本，支持中断）"""
+        current_time = datetime.now()
+
+        # 检查是否收到停止信号
+        if self.stop_event.is_set():
+            return False
+
+        try:
+            source_conn = await self.connect_source(schema_name)
+            if not source_conn:
+                return False
+
+            try:
+                if use_information_schema:
+                    # 检查停止标志
+                    if self.stop_event.is_set():
+                        return False
+
+                    # 更新TableInfo中的源行数（汇总所有源表的记录数）
+                    for table_info in tables_dict.values():
+                        # 检查停止标志
+                        if self.stop_event.is_set():
+                            return False
+
+                        async with self.source_update_lock:
+                            if table_info.source_updating:
+                                continue  # 如果正在更新中，跳过
+
+                            table_info.source_updating = True
+                            table_info.source_rows = 0  # 重置
+
+                        # 累加所有源表的估计行数
+                        for source_table_name in table_info.source_tables:
+                            if self.stop_event.is_set():
+                                async with self.source_update_lock:
+                                    table_info.source_updating = False
+                                return False
+
+                            try:
+                                async with source_conn.cursor() as cursor:
+                                    await cursor.execute("""
+                                                         SELECT table_rows
+                                                         FROM information_schema.tables
+                                                         WHERE table_schema = %s
+                                                           AND table_name = %s
+                                                         """, (schema_name, source_table_name))
+                                    result = await cursor.fetchone()
+                                    if result and result[0]:
+                                        table_info.source_rows += result[0]
+                            except:
+                                continue
+
+                        async with self.source_update_lock:
+                            table_info.source_last_updated = current_time
+                            table_info.source_updating = False
+                            table_info.source_is_estimated = True  # 标记为估计值
+                else:
+                    # 常规更新使用精确的COUNT查询
+                    # 首先标记所有表为更新中状态
+                    async with self.source_update_lock:
+                        for table_info in tables_dict.values():
+                            if not table_info.source_updating:
+                                table_info.source_updating = True
+
+                    # 然后逐个处理表
+                    for table_info in tables_dict.values():
+                        # 检查停止标志
+                        if self.stop_event.is_set():
+                            # 恢复所有表的状态
+                            async with self.source_update_lock:
+                                for ti in tables_dict.values():
+                                    ti.source_updating = False
+                            return False
+
+                        # 更新源记录数（汇总所有源表的精确记录数）
+                        temp_source_rows = 0
+                        for source_table_name in table_info.source_tables:
+                            if self.stop_event.is_set():
+                                async with self.source_update_lock:
+                                    for ti in tables_dict.values():
+                                        ti.source_updating = False
+                                return False
+
+                            try:
+                                async with source_conn.cursor() as cursor:
+                                    await cursor.execute(f"SELECT COUNT(*) FROM `{schema_name}`.`{source_table_name}`")
+                                    result = await cursor.fetchone()
+                                    if result:
+                                        temp_source_rows += result[0]
+                            except Exception as e:
+                                continue
+
+                        # 查询完成后更新结果
+                        async with self.source_update_lock:
+                            table_info.source_rows = temp_source_rows
+                            table_info.source_last_updated = current_time
+                            table_info.source_updating = False
+                            table_info.source_is_estimated = False  # 标记为精确值
+
+                return True
+            finally:
+                source_conn.close()
+
+        except Exception as e:
+            # 出现异常时，标记所有表的source_updating为False
+            async with self.source_update_lock:
+                for table_info in tables_dict.values():
+                    if table_info.source_updating:
+                        table_info.source_updating = False
+            return False
+
+    async def update_source_counts(self, target_tables: Dict[str, Dict[str, TableInfo]],
+                                   use_information_schema: bool = False):
+        """更新源MySQL记录数（同步版本，用于兼容性）"""
+        for schema_name, tables_dict in target_tables.items():
+            await self._update_single_schema_source(schema_name, tables_dict, use_information_schema)
+
+    async def update_source_counts_async(self, target_tables: Dict[str, Dict[str, TableInfo]],
+                                         use_information_schema: bool = False):
+        """异步更新源MySQL记录数（不阻塞主线程）"""
+        # 清理已完成的任务
+        self.source_update_tasks = [f for f in self.source_update_tasks if not f.done()]
+
+        # 为每个schema提交异步更新任务
+        for schema_name, tables_dict in target_tables.items():
+            # 检查该schema是否已经有正在进行的更新任务
+            schema_updating = False
+            async with self.source_update_lock:
+                for table_info in tables_dict.values():
+                    if table_info.source_updating:
+                        schema_updating = True
+                        break
+
+            if not schema_updating:
+                future = asyncio.create_task(
+                    self._update_single_schema_source(schema_name, tables_dict, use_information_schema))
+                self.source_update_tasks.append(future)
+
+    async def _update_single_schema_target(self, schema_name: str, tables_dict: Dict[str, TableInfo]) -> bool:
         """更新单个schema的目标MySQL记录数（异步版本，支持中断）"""
         current_time = datetime.now()
 
@@ -1059,12 +1202,12 @@ class MonitorApp(App[None]):
             return False
 
         try:
-            conn = await self.target.connect(schema_name)
-            if not conn:
+            target_conn = await self.connect_target(schema_name)
+            if not target_conn:
                 return False
 
             try:
-                # 常规更新使用精确的COUNT查询 - 优化显示逻辑
+                # 常规更新使用精确的COUNT查询
                 # 首先标记所有表为更新中状态
                 async with self.target_update_lock:
                     for table_info in tables_dict.values():
@@ -1083,8 +1226,13 @@ class MonitorApp(App[None]):
 
                     # 在锁外执行查询以避免长时间锁定
                     try:
-                        # 使用 MySQLConfig 的方法获取精确行数
-                        new_count = await self.target.get_table_rows_count(conn, target_table_name)
+                        # 直接获取目标表的记录数
+                        new_count = 0
+                        async with target_conn.cursor() as cursor:
+                            await cursor.execute(f"SELECT COUNT(*) FROM `{schema_name}`.`{target_table_name}`")
+                            result = await cursor.fetchone()
+                            if result:
+                                new_count = result[0]
 
                         # 查询完成后更新结果
                         async with self.target_update_lock:
@@ -1115,7 +1263,7 @@ class MonitorApp(App[None]):
 
                 return True
             finally:
-                conn.close()
+                target_conn.close()
 
         except Exception as e:
             # 出现异常时，标记所有表的target_updating为False
@@ -1125,7 +1273,47 @@ class MonitorApp(App[None]):
                         table_info.target_updating = False
             return False
 
-    async def update_target_mysql_counts_exact(self, conn, target_tables: Dict[str, Dict[str, TableInfo]]):
+    async def update_target_counts(self, conn, target_tables: Dict[str, Dict[str, TableInfo]]):
+        """更新目标MySQL记录数（同步版本，用于兼容性）"""
+        current_time = datetime.now()
+        self.target_updating = True
+        try:
+            for schema_name, tables_dict in target_tables.items():
+                for target_table_name, table_info in tables_dict.items():
+                    try:
+                        # 直接获取目标表的记录数
+                        new_count = 0
+                        async with conn.cursor() as cursor:
+                            await cursor.execute(f"SELECT COUNT(*) FROM `{schema_name}`.`{target_table_name}`")
+                            result = await cursor.fetchone()
+                            if result:
+                                new_count = result[0]
+
+                        if not table_info.is_first_query:
+                            table_info.previous_target_rows = table_info.target_rows
+                        else:
+                            table_info.previous_target_rows = new_count
+                            table_info.is_first_query = False
+
+                        table_info.target_rows = new_count
+                        table_info.target_last_updated = current_time
+                        table_info.target_is_estimated = False  # 标记为精确值
+
+                    except Exception as e:
+                        # 出现异常时标记为错误状态，记录数设为-1表示错误
+                        if not table_info.is_first_query:
+                            table_info.previous_target_rows = table_info.target_rows
+                        else:
+                            table_info.previous_target_rows = -1
+                            table_info.is_first_query = False
+
+                        table_info.target_rows = -1  # -1表示查询失败
+                        table_info.target_last_updated = current_time
+                        table_info.target_is_estimated = False  # 错误状态不是估计值
+        finally:
+            self.target_updating = False
+
+    async def update_target_counts_async(self, target_tables: Dict[str, Dict[str, TableInfo]]):
         """异步更新目标MySQL记录数（不阻塞主线程）"""
         # 清理已完成的任务
         self.target_update_tasks = [f for f in self.target_update_tasks if not f.done()]
@@ -1138,83 +1326,35 @@ class MonitorApp(App[None]):
         for schema_name, tables_dict in target_tables.items():
             # 检查该schema是否已经有正在进行的更新任务
             schema_updating = False
-            for table_info in tables_dict.values():
-                if table_info.target_updating:
-                    schema_updating = True
-                    break
+            async with self.target_update_lock:
+                for table_info in tables_dict.values():
+                    if table_info.target_updating:
+                        schema_updating = True
+                        break
 
             if not schema_updating:
-                future = asyncio.create_task(self._update_single_schema_target_mysql(schema_name, tables_dict))
+                future = asyncio.create_task(
+                    self._update_single_schema_target(schema_name, tables_dict))
                 self.target_update_tasks.append(future)
-
-    async def update_target_mysql_counts_async(self, target_tables: Dict[str, Dict[str, TableInfo]]):
-        """异步更新目标MySQL记录数（不阻塞主线程）"""
-        await self.update_target_mysql_counts_exact(None, target_tables)
-
-    async def update_target_mysql_counts(self, conn, target_tables: Dict[str, Dict[str, TableInfo]]):
-        """更新目标MySQL记录数（同步版本，用于兼容性）"""
-        current_time = datetime.now()
-        self.target_updating = True
-        try:
-            await self._update_target_mysql_counts_exact(conn, target_tables)
-        finally:
-            self.target_updating = False
-
-    async def _update_target_mysql_counts_exact(self, conn, target_tables: Dict[str, Dict[str, TableInfo]]):
-        """使用精确COUNT查询更新目标MySQL记录数"""
-        current_time = datetime.now()
-        for schema_name, tables_dict in target_tables.items():
-            for target_table_name, table_info in tables_dict.items():
-                try:
-                    # 直接获取记录数
-                    async with conn.cursor() as cursor:
-                        await cursor.execute(f"SELECT COUNT(*) FROM `{schema_name}`.`{target_table_name}`")
-                        result = await cursor.fetchone()
-                        new_count = result[0] if result else 0
-
-                    if not table_info.is_first_query:
-                        table_info.previous_target_rows = table_info.target_rows
-                    else:
-                        table_info.previous_target_rows = new_count
-                        table_info.is_first_query = False
-
-                    table_info.target_rows = new_count
-                    table_info.last_updated = current_time
-                    table_info.target_is_estimated = False  # 标记为精确值
-
-                except Exception as e:
-                    # 出现异常时标记为错误状态，记录数设为-1表示错误
-                    if not table_info.is_first_query:
-                        table_info.previous_target_rows = table_info.target_rows
-                    else:
-                        table_info.previous_target_rows = -1
-                        table_info.is_first_query = False
-
-                    table_info.target_rows = -1  # -1表示查询失败
-                    table_info.last_updated = current_time
-                    table_info.target_is_estimated = False  # 错误状态不是估计值
-
-
-
 
 
 def main():
     """主函数"""
     parser = argparse.ArgumentParser(
-        description="MySQL vs MySQL 数据一致性监控工具 (Textual版本)",
+        description="MySQL vs MySQL 数据一致性监控工具 (Textual版本，支持表映射关系)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例用法:
-  python3 cdc_monitor.py                          # 使用配置文件中的数据库列表
-  python3 cdc_monitor.py --databases db1,db2     # 监控指定的数据库
-  python3 cdc_monitor.py -d test_db               # 只监控test_db数据库
-  python3 cdc_monitor.py --config my_config.ini  # 使用指定的配置文件
+  python3 app.py                          # 使用配置文件中的数据库列表
+  python3 app.py --databases db1,db2     # 监控指定的数据库
+  python3 app.py -d test_db               # 只监控test_db数据库
+  python3 app.py --config my_config.ini  # 使用指定的配置文件
 
 快捷键:
   q/Ctrl+C : 退出程序
   r        : 手动刷新数据
   space    : 暂停/继续监控
-  s        : 切换排序方式 (Schema.表名 → 数据差异 → PG记录数 → MySQL记录数)
+  s        : 切换排序方式 (Schema.表名 → 数据差异 → 目标记录数 → 源记录数)
   f        : 切换过滤方式 (全部 → 不一致 → 一致 → 错误)
   方向键   : 移动光标浏览表格
   Page Up/Down : 快速翻页
@@ -1239,7 +1379,7 @@ def main():
     # 检查配置文件是否存在
     config_file = args.config
     if not Path(config_file).exists():
-        print(f"❌️ 配置文件不存在: {config_file}")
+        print(f"❌ 配置文件不存在: {config_file}")
         print("请确保config.ini文件存在并配置正确")
         sys.exit(1)
 
@@ -1248,7 +1388,7 @@ def main():
     if args.databases:
         override_databases = [db.strip() for db in args.databases.split(',') if db.strip()]
         if not override_databases:
-            print("❌️ 指定的数据库列表为空")
+            print("❌ 指定的数据库列表为空")
             sys.exit(1)
 
     app = MonitorApp(config_file, override_databases)
