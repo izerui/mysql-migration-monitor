@@ -697,12 +697,14 @@ class MonitorApp(App[None]):
         if self.stop_event.is_set() or self.is_paused:
             return
 
-        # 重新构建target_tables结构用于更新，跳过暂停自动刷新的表
+        # 重新构建target_tables结构用于更新
+        # 数据不一致的表始终更新，数据一致的表根据pause_auto_refresh决定
         target_tables = {}
         skipped_count = 0
         for table_info in self.tables:
-            # 跳过暂停自动刷新的表
-            if table_info.pause_auto_refresh:
+            # 如果数据不一致，始终更新（忽略pause_auto_refresh）
+            # 如果数据一致且暂停自动刷新，则跳过
+            if table_info.is_consistent and table_info.pause_auto_refresh:
                 skipped_count += 1
                 continue
             schema_name = table_info.schema_name
@@ -712,7 +714,7 @@ class MonitorApp(App[None]):
 
         # 如果没有需要更新的表，直接返回
         if not target_tables:
-            self.log(f"所有表都已暂停自动刷新，跳过更新 (共跳过 {skipped_count} 个表)")
+            self.log(f"所有表都已暂停自动刷新或数据一致，跳过更新 (共跳过 {skipped_count} 个表)")
             return
         else:
             self.log(f"自动刷新 {len(target_tables)} 个schema的表，跳过 {skipped_count} 个已暂停的表")
