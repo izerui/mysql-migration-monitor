@@ -699,9 +699,11 @@ class MonitorApp(App[None]):
 
         # 重新构建target_tables结构用于更新，跳过暂停自动刷新的表
         target_tables = {}
+        skipped_count = 0
         for table_info in self.tables:
             # 跳过暂停自动刷新的表
             if table_info.pause_auto_refresh:
+                skipped_count += 1
                 continue
             schema_name = table_info.schema_name
             if schema_name not in target_tables:
@@ -710,7 +712,10 @@ class MonitorApp(App[None]):
 
         # 如果没有需要更新的表，直接返回
         if not target_tables:
+            self.log(f"所有表都已暂停自动刷新，跳过更新 (共跳过 {skipped_count} 个表)")
             return
+        else:
+            self.log(f"自动刷新 {len(target_tables)} 个schema的表，跳过 {skipped_count} 个已暂停的表")
 
         # 更新目标MySQL记录数
         self.target_iteration += 1
@@ -739,6 +744,7 @@ class MonitorApp(App[None]):
         # 重置所有表的暂停状态
         for table_info in self.tables:
             table_info.pause_auto_refresh = False
+        self.log("手动刷新，重置所有表的暂停状态")
 
         self.call_later(self.refresh_data)
 
@@ -1123,18 +1129,19 @@ class MonitorApp(App[None]):
                     if self.stop_event.is_set():
                         return False
 
+                    # 首先标记所有表为更新中状态
+                    async with self.source_update_lock:
+                        for table_info in tables_dict.values():
+                            if not table_info.source_updating:
+                                table_info.source_updating = True
+                                table_info.source_rows = 0  # 重置
+                                self.log(f"源表 {table_info.target_table_name} 开始更新")
+
                     # 更新TableInfo中的源行数（汇总所有源表的记录数）
                     for table_info in tables_dict.values():
                         # 检查停止标志
                         if self.stop_event.is_set():
                             return False
-
-                        async with self.source_update_lock:
-                            if table_info.source_updating:
-                                continue  # 如果正在更新中，跳过
-
-                            table_info.source_updating = True
-                            table_info.source_rows = 0  # 重置
 
                         # 累加所有源表的估计行数
                         for source_table_name in table_info.source_tables:
@@ -1203,11 +1210,16 @@ class MonitorApp(App[None]):
                             table_info.source_last_updated = current_time
                             table_info.source_updating = False
                             table_info.source_is_estimated = False  # 标记为精确值
+                            self.log(f"源表 {table_info.target_table_name} 更新完成，行数: {temp_source_rows}")
 
                             # 检查数据是否一致，如果一致则暂停自动刷新
                             if table_info.is_consistent:
                                 table_info.pause_auto_refresh = True
+                                self.log(f"表 {table_info.target_table_name} 数据一致，暂停自动刷新")
 
+                # 更新表格显示（延迟一点以确保能看到"更新中"状态）
+                await asyncio.sleep(0.5)
+                self.call_from_thread(self.update_display)
                 return True
             finally:
                 source_conn.close()
@@ -1267,6 +1279,7 @@ class MonitorApp(App[None]):
                     for table_info in tables_dict.values():
                         if not table_info.target_updating:
                             table_info.target_updating = True
+                            self.log(f"目标表 {table_info.target_table_name} 开始更新")
 
                 # 然后逐个处理表
                 for target_table_name, table_info in tables_dict.items():
@@ -1300,6 +1313,7 @@ class MonitorApp(App[None]):
                             table_info.target_last_updated = current_time
                             table_info.target_updating = False
                             table_info.target_is_estimated = False  # 标记为精确值
+                            self.log(f"目标表 {table_info.target_table_name} 更新完成，行数: {new_count}")
 
                     except Exception as e:
                         # 出现异常时标记为错误状态
@@ -1312,9 +1326,11 @@ class MonitorApp(App[None]):
 
                             table_info.target_rows = -1  # -1表示查询失败
                             table_info.target_last_updated = current_time
-                            table_info.target_updating = False
                             table_info.target_is_estimated = False  # 错误状态不是估计值
 
+                    # 更新表格显示（延迟一点以确保能看到"更新中"状态）
+                    await asyncio.sleep(0.5)
+                    self.call_from_thread(self.update_display)
                 return True
             finally:
                 target_conn.close()
