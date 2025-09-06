@@ -452,7 +452,7 @@ class MonitorApp(App[None]):
         # 设置数据表格
         table = self.query_one("#tables", DataTable)
         table.add_columns(
-            "序号", "状态", "SCHEMA", "目标表名", "目标行数",
+            "序号", "SCHEMA", "目标表名", "状态", "目标行数",
             "源汇总数", "数据差异", "变化量", "目标更新", "源更新", "源表数量"
         )
 
@@ -664,9 +664,9 @@ class MonitorApp(App[None]):
                 # 添加行到表格
                 table.add_row(
                     str(i),
-                    icon,
                     schema_display,
                     table_display,
+                    icon,
                     target_rows_display,
                     source_rows_display,
                     diff_text,
