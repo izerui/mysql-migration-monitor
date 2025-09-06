@@ -1,9 +1,12 @@
-# 全局配置
-[global]
+# 监控配置
+[monitor]
 # 要迁移的数据库，支持多个
 databases = cloud_sale,other_db
-# 刷新间隔，单位秒
-refresh_interval = 3
+# 刷新间隔，单位秒（目标数据库更新频率）
+refresh_interval = 2
+
+# 源数据库更新间隔，单位秒（源数据库更新频率，建议比目标数据库低）
+source_update_interval = 5
 
 [source]
 # 源数据库 MySQL 配置

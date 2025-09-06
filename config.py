@@ -80,4 +80,4 @@ class MySQLConfig:
 class GlobConfig:
     """全局配置"""
     databases: List[str] = field(default_factory=list)
-    refresh_interval: int = 3
+    refresh_interval: int = 2

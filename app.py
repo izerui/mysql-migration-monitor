@@ -396,7 +396,7 @@ class MonitorApp(App[None]):
         # 分离的更新计数器
         self.target_iteration = 0
         self.source_iteration = 0
-        self.source_update_interval = 3
+        self.source_update_interval = 5
         self.first_source_update = True
         self.first_target_update = True
         self.target_updating = False
@@ -502,7 +502,7 @@ class MonitorApp(App[None]):
         self.update_display()
 
         # 启动定时刷新
-        refresh_interval = self.monitor_config.get('refresh_interval', 3)
+        refresh_interval = self.monitor_config.get('refresh_interval', 2)
         self.refresh_timer = self.set_interval(refresh_interval, self.refresh_data)
 
     def update_display(self):
@@ -907,8 +907,8 @@ class MonitorApp(App[None]):
 
             self.monitor_config = {
                 'databases': databases_list,
-                'refresh_interval': int(monitor_section.get('refresh_interval', 3)),
-                'source_update_interval': int(monitor_section.get('source_update_interval', 3)),
+                'refresh_interval': int(monitor_section.get('refresh_interval', 2)),
+                'source_update_interval': int(monitor_section.get('source_update_interval', 5)),
                 'ignored_table_prefixes': monitor_section.get('ignored_table_prefixes', '').split(',')
             }
 
@@ -1139,6 +1139,9 @@ class MonitorApp(App[None]):
                                 table_info.source_rows = 0  # 重置
                                 self.log(f"源表 {table_info.target_table_name} 开始更新")
 
+                    # 立即更新显示以确保能看到"更新中"状态
+                    self.call_from_thread(self.update_display)
+
                     # 更新TableInfo中的源行数（汇总所有源表的记录数）
                     for table_info in tables_dict.values():
                         # 检查停止标志
@@ -1219,9 +1222,6 @@ class MonitorApp(App[None]):
                                 table_info.pause_auto_refresh = True
                                 self.log(f"表 {table_info.target_table_name} 数据一致，暂停自动刷新")
 
-                # 更新表格显示（延迟一点以确保能看到"更新中"状态）
-                await asyncio.sleep(0.5)
-                self.call_from_thread(self.update_display)
                 return True
             finally:
                 source_conn.close()
@@ -1283,6 +1283,9 @@ class MonitorApp(App[None]):
                             table_info.target_updating = True
                             self.log(f"目标表 {table_info.target_table_name} 开始更新")
 
+                # 立即更新显示以确保能看到"更新中"状态
+                self.call_from_thread(self.update_display)
+
                 # 然后逐个处理表
                 for target_table_name, table_info in tables_dict.items():
                     # 检查停止标志
@@ -1330,9 +1333,6 @@ class MonitorApp(App[None]):
                             table_info.target_last_updated = current_time
                             table_info.target_is_estimated = False  # 错误状态不是估计值
 
-                    # 更新表格显示（延迟一点以确保能看到"更新中"状态）
-                    await asyncio.sleep(0.5)
-                    self.call_from_thread(self.update_display)
                 return True
             finally:
                 target_conn.close()
@@ -1393,10 +1393,6 @@ class MonitorApp(App[None]):
         """异步更新目标MySQL记录数（不阻塞主线程）"""
         # 清理已完成的任务
         self.target_update_tasks = [f for f in self.target_update_tasks if not f.done()]
-
-        # 检查是否已经有正在进行的更新任务
-        if self.target_updating:
-            return
 
         # 为每个schema提交异步更新任务
         for schema_name, tables_dict in target_tables.items():
