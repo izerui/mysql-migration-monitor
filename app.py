@@ -425,6 +425,7 @@ class MonitorApp(App[None]):
 
         # 用于增量更新的数据缓存
         self._last_tables_hash = None
+        self._last_display_data = {}
 
         # 信号处理
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -572,108 +573,108 @@ class MonitorApp(App[None]):
             # 清空表格并重新填充
             table.clear()
 
-        for i, t in enumerate(sorted_tables, 1):
-            # 状态图标
-            if t.target_rows == -1 or t.source_rows == -1:
-                icon = "❌"
-            elif t.is_consistent:
-                icon = "✅"
-            else:
-                icon = "⚠️"
-
-            # 数据差异文本和样式
-            if t.target_rows == -1 or t.source_rows == -1:
-                diff_text = "[bold bright_red]ERROR[/]"
-            else:
-                if t.data_diff < 0:
-                    diff_text = f"[bold orange3]{t.data_diff:+,}[/]"
-                elif t.data_diff > 0:
-                    diff_text = f"[bold bright_green]{t.data_diff:+,}[/]"
+            for i, t in enumerate(sorted_tables, 1):
+                # 状态图标
+                if t.target_rows == -1 or t.source_rows == -1:
+                    icon = "❌"
+                elif t.is_consistent:
+                    icon = "✅"
                 else:
-                    diff_text = "[dim white]0[/]"
+                    icon = "⚠️"
 
-            # 变化量文本和样式
-            if t.target_rows == -1:
-                change_text = "[bold bright_red]ERROR[/]"
-            elif t.change > 0:
-                change_text = f"[bold spring_green3]+{t.change:,} ⬆[/]"
-            elif t.change < 0:
-                change_text = f"[bold orange3]{t.change:,} ⬇[/]"
-            else:
-                change_text = "[dim white]0[/]"
-
-            # 目标更新时间样式
-            if t.target_updating:
-                target_time_display = "[yellow3]更新中[/]"
-            else:
-                target_relative_time = self.get_relative_time(t.target_last_updated)
-                if "年前" in target_relative_time or "个月前" in target_relative_time:
-                    target_time_display = f"[bold orange1]{target_relative_time}[/]"
-                elif "天前" in target_relative_time:
-                    target_time_display = f"[bold yellow3]{target_relative_time}[/]"
-                elif "小时前" in target_relative_time:
-                    target_time_display = f"[bright_cyan]{target_relative_time}[/]"
+                # 数据差异文本和样式
+                if t.target_rows == -1 or t.source_rows == -1:
+                    diff_text = "[bold bright_red]ERROR[/]"
                 else:
-                    target_time_display = f"[dim bright_black]{target_relative_time}[/]"
+                    if t.data_diff < 0:
+                        diff_text = f"[bold orange3]{t.data_diff:+,}[/]"
+                    elif t.data_diff > 0:
+                        diff_text = f"[bold bright_green]{t.data_diff:+,}[/]"
+                    else:
+                        diff_text = "[dim white]0[/]"
 
-            # 源更新时间样式
-            if t.source_updating:
-                source_time_display = "[yellow3]更新中[/]"
-            else:
-                source_relative_time = self.get_relative_time(t.source_last_updated)
-                if "年前" in source_relative_time or "个月前" in source_relative_time:
-                    source_time_display = f"[bold orange1]{source_relative_time}[/]"
-                elif "天前" in source_relative_time:
-                    source_time_display = f"[bold yellow3]{source_relative_time}[/]"
-                elif "小时前" in source_relative_time:
-                    source_time_display = f"[bright_cyan]{source_relative_time}[/]"
+                # 变化量文本和样式
+                if t.target_rows == -1:
+                    change_text = "[bold bright_red]ERROR[/]"
+                elif t.change > 0:
+                    change_text = f"[bold spring_green3]+{t.change:,} ⬆[/]"
+                elif t.change < 0:
+                    change_text = f"[bold orange3]{t.change:,} ⬇[/]"
                 else:
-                    source_time_display = f"[dim bright_black]{source_relative_time}[/]"
+                    change_text = "[dim white]0[/]"
 
-            # 记录数显示和样式
-            if t.target_rows == -1:
-                target_rows_display = "[bold bright_red]ERROR[/]"
-            elif t.target_is_estimated:
-                target_rows_display = f"[italic bright_blue]~{t.target_rows:,}[/]"
-            else:
-                target_rows_display = f"[bold bright_cyan]{t.target_rows:,}[/]"
+                # 目标更新时间样式
+                if t.target_updating:
+                    target_time_display = "[yellow3]更新中[/]"
+                else:
+                    target_relative_time = self.get_relative_time(t.target_last_updated)
+                    if "年前" in target_relative_time or "个月前" in target_relative_time:
+                        target_time_display = f"[bold orange1]{target_relative_time}[/]"
+                    elif "天前" in target_relative_time:
+                        target_time_display = f"[bold yellow3]{target_relative_time}[/]"
+                    elif "小时前" in target_relative_time:
+                        target_time_display = f"[bright_cyan]{target_relative_time}[/]"
+                    else:
+                        target_time_display = f"[dim bright_black]{target_relative_time}[/]"
 
-            if t.source_rows == -1:
-                source_rows_display = "[bold bright_red]ERROR[/]"
-            elif t.source_is_estimated:
-                source_rows_display = f"[italic green3]~{t.source_rows:,}[/]"
-            else:
-                source_rows_display = f"[bold bright_green]{t.source_rows:,}[/]"
+                # 源更新时间样式
+                if t.source_updating:
+                    source_time_display = "[yellow3]更新中[/]"
+                else:
+                    source_relative_time = self.get_relative_time(t.source_last_updated)
+                    if "年前" in source_relative_time or "个月前" in source_relative_time:
+                        source_time_display = f"[bold orange1]{source_relative_time}[/]"
+                    elif "天前" in source_relative_time:
+                        source_time_display = f"[bold yellow3]{source_relative_time}[/]"
+                    elif "小时前" in source_relative_time:
+                        source_time_display = f"[bright_cyan]{source_relative_time}[/]"
+                    else:
+                        source_time_display = f"[dim bright_black]{source_relative_time}[/]"
 
-            # Schema名称和表名样式
-            schema_display = f"[bold medium_purple3]{t.schema_name[:12] + '...' if len(t.schema_name) > 15 else t.schema_name}[/]"
-            table_display = f"[bold dodger_blue2]{t.target_table_name[:35] + '...' if len(t.target_table_name) > 38 else t.target_table_name}[/]"
+                # 记录数显示和样式
+                if t.target_rows == -1:
+                    target_rows_display = "[bold bright_red]ERROR[/]"
+                elif t.target_is_estimated:
+                    target_rows_display = f"[italic bright_blue]~{t.target_rows:,}[/]"
+                else:
+                    target_rows_display = f"[bold bright_cyan]{t.target_rows:,}[/]"
 
-            # 源表数量样式
-            source_count = len(t.source_tables)
-            if source_count >= 5:
-                source_count_display = f"[bold orange1]{source_count}[/]"
-            elif source_count >= 3:
-                source_count_display = f"[bold yellow3]{source_count}[/]"
-            elif source_count >= 2:
-                source_count_display = f"[bright_cyan]{source_count}[/]"
-            else:
-                source_count_display = f"[dim bright_white]{source_count}[/]"
+                if t.source_rows == -1:
+                    source_rows_display = "[bold bright_red]ERROR[/]"
+                elif t.source_is_estimated:
+                    source_rows_display = f"[italic green3]~{t.source_rows:,}[/]"
+                else:
+                    source_rows_display = f"[bold bright_green]{t.source_rows:,}[/]"
 
-            # 添加行到表格
-            table.add_row(
-                str(i),
-                icon,
-                schema_display,
-                table_display,
-                target_rows_display,
-                source_rows_display,
-                diff_text,
-                change_text,
-                target_time_display,
-                source_time_display,
-                source_count_display
-            )
+                # Schema名称和表名样式
+                schema_display = f"[bold medium_purple3]{t.schema_name[:12] + '...' if len(t.schema_name) > 15 else t.schema_name}[/]"
+                table_display = f"[bold dodger_blue2]{t.target_table_name[:35] + '...' if len(t.target_table_name) > 38 else t.target_table_name}[/]"
+
+                # 源表数量样式
+                source_count = len(t.source_tables)
+                if source_count >= 5:
+                    source_count_display = f"[bold orange1]{source_count}[/]"
+                elif source_count >= 3:
+                    source_count_display = f"[bold yellow3]{source_count}[/]"
+                elif source_count >= 2:
+                    source_count_display = f"[bright_cyan]{source_count}[/]"
+                else:
+                    source_count_display = f"[dim bright_white]{source_count}[/]"
+
+                # 添加行到表格
+                table.add_row(
+                    str(i),
+                    icon,
+                    schema_display,
+                    table_display,
+                    target_rows_display,
+                    source_rows_display,
+                    diff_text,
+                    change_text,
+                    target_time_display,
+                    source_time_display,
+                    source_count_display
+                )
 
         # 恢复滚动位置
         if current_scroll_y > 0 and hasattr(table, 'scroll_y'):
@@ -693,6 +694,133 @@ class MonitorApp(App[None]):
         for t in tables:
             data_str += f"{t.schema_name}:{t.target_table_name}:{t.target_rows}:{t.source_rows}:{t.data_diff}:{t.change}:{len(t.source_tables)}:"
         return hashlib.md5(data_str.encode()).hexdigest()
+
+
+
+
+
+    def _rebuild_data_table(self, sorted_tables: List[TableInfo]):
+        """重建数据表格（仅在必要时调用）"""
+        table = self.query_one("#tables", DataTable)
+
+        # 保存当前滚动位置
+        current_scroll_y = table.scroll_y if hasattr(table, 'scroll_y') else 0
+
+        # 使用批量更新减少闪烁
+        with self.app.batch_update():
+            # 清空表格并重新填充
+            table.clear()
+
+            for i, t in enumerate(sorted_tables, 1):
+                # 状态图标
+                if t.target_rows == -1 or t.source_rows == -1:
+                    icon = "❌"
+                elif t.is_consistent:
+                    icon = "✅"
+                else:
+                    icon = "⚠️"
+
+                # 数据差异文本和样式
+                if t.target_rows == -1 or t.source_rows == -1:
+                    diff_text = "[bold bright_red]ERROR[/]"
+                else:
+                    if t.data_diff < 0:
+                        diff_text = f"[bold orange3]{t.data_diff:+,}[/]"
+                    elif t.data_diff > 0:
+                        diff_text = f"[bold bright_green]{t.data_diff:+,}[/]"
+                    else:
+                        diff_text = "[dim white]0[/]"
+
+                # 变化量文本和样式
+                if t.target_rows == -1:
+                    change_text = "[bold bright_red]ERROR[/]"
+                elif t.change > 0:
+                    change_text = f"[bold spring_green3]+{t.change:,} ⬆[/]"
+                elif t.change < 0:
+                    change_text = f"[bold orange3]{t.change:,} ⬇[/]"
+                else:
+                    change_text = "[dim white]0[/]"
+
+                # 目标更新时间样式
+                if t.target_updating:
+                    target_time_display = "[yellow3]更新中[/]"
+                else:
+                    target_relative_time = self.get_relative_time(t.target_last_updated)
+                    if "年前" in target_relative_time or "个月前" in target_relative_time:
+                        target_time_display = f"[bold orange1]{target_relative_time}[/]"
+                    elif "天前" in target_relative_time:
+                        target_time_display = f"[bold yellow3]{target_relative_time}[/]"
+                    elif "小时前" in target_relative_time:
+                        target_time_display = f"[bright_cyan]{target_relative_time}[/]"
+                    else:
+                        target_time_display = f"[dim bright_black]{target_relative_time}[/]"
+
+                # 源更新时间样式
+                if t.source_updating:
+                    source_time_display = "[yellow3]更新中[/]"
+                else:
+                    source_relative_time = self.get_relative_time(t.source_last_updated)
+                    if "年前" in source_relative_time or "个月前" in source_relative_time:
+                        source_time_display = f"[bold orange1]{source_relative_time}[/]"
+                    elif "天前" in source_relative_time:
+                        source_time_display = f"[bold yellow3]{source_relative_time}[/]"
+                    elif "小时前" in source_relative_time:
+                        source_time_display = f"[bright_cyan]{source_relative_time}[/]"
+                    else:
+                        source_time_display = f"[dim bright_black]{source_relative_time}[/]"
+
+                # 记录数显示和样式
+                if t.target_rows == -1:
+                    target_rows_display = "[bold bright_red]ERROR[/]"
+                elif t.target_is_estimated:
+                    target_rows_display = f"[italic bright_blue]~{t.target_rows:,}[/]"
+                else:
+                    target_rows_display = f"[bold bright_cyan]{t.target_rows:,}[/]"
+
+                if t.source_rows == -1:
+                    source_rows_display = "[bold bright_red]ERROR[/]"
+                elif t.source_is_estimated:
+                    source_rows_display = f"[italic green3]~{t.source_rows:,}[/]"
+                else:
+                    source_rows_display = f"[bold bright_green]{t.source_rows:,}[/]"
+
+                # Schema名称和表名样式
+                schema_display = f"[bold medium_purple3]{t.schema_name[:12] + '...' if len(t.schema_name) > 15 else t.schema_name}[/]"
+                table_display = f"[bold dodger_blue2]{t.target_table_name[:35] + '...' if len(t.target_table_name) > 38 else t.target_table_name}[/]"
+
+                # 源表数量样式
+                source_count = len(t.source_tables)
+                if source_count >= 5:
+                    source_count_display = f"[bold orange1]{source_count}[/]"
+                elif source_count >= 3:
+                    source_count_display = f"[bold yellow3]{source_count}[/]"
+                elif source_count >= 2:
+                    source_count_display = f"[bright_cyan]{source_count}[/]"
+                else:
+                    source_count_display = f"[dim bright_white]{source_count}[/]"
+
+                # 添加行到表格
+                table.add_row(
+                    str(i),
+                    icon,
+                    schema_display,
+                    table_display,
+                    target_rows_display,
+                    source_rows_display,
+                    diff_text,
+                    change_text,
+                    target_time_display,
+                    source_time_display,
+                    source_count_display
+                )
+
+        # 恢复滚动位置
+        if current_scroll_y > 0 and hasattr(table, 'scroll_y'):
+            try:
+                max_scroll = table.max_scroll_y if hasattr(table, 'max_scroll_y') else current_scroll_y
+                table.scroll_y = min(current_scroll_y, max_scroll)
+            except Exception:
+                pass  # 如果恢复失败，保持默认位置
 
     async def refresh_data(self):
         """定时刷新数据"""
@@ -1146,37 +1274,95 @@ class MonitorApp(App[None]):
                     # 立即更新显示以确保能看到"更新中"状态
                     self.call_from_thread(self.update_display)
 
-                    # 更新TableInfo中的源行数（汇总所有源表的记录数）
-                    for table_info in tables_dict.values():
-                        # 检查停止标志
-                        if self.stop_event.is_set():
-                            return False
+                    # 使用批量查询获取所有源表的估计行数
+                    if tables_dict:
+                        # 构建所有需要查询的源表
+                        all_source_tables = []
+                        table_source_map = {}  # 记录每个目标表对应的源表
 
-                        # 累加所有源表的估计行数
-                        for source_table_name in table_info.source_tables:
-                            if self.stop_event.is_set():
-                                async with self.source_update_lock:
-                                    table_info.source_updating = False
-                                return False
+                        for target_table_name, table_info in tables_dict.items():
+                            table_source_map[target_table_name] = table_info.source_tables
+                            all_source_tables.extend(table_info.source_tables)
 
+                        # 去重
+                        unique_source_tables = list(set(all_source_tables))
+
+                        if unique_source_tables:
                             try:
                                 async with source_conn.cursor() as cursor:
-                                    await cursor.execute("""
-                                                         SELECT table_rows
-                                                         FROM information_schema.tables
-                                                         WHERE table_schema = %s
-                                                           AND table_name = %s
-                                                         """, (schema_name, source_table_name))
-                                    result = await cursor.fetchone()
-                                    if result and result[0]:
-                                        table_info.source_rows += result[0]
-                            except:
-                                continue
+                                    # 构建IN查询批量获取所有源表的行数
+                                    placeholders = ','.join(['%s'] * len(unique_source_tables))
+                                    await cursor.execute(f"""
+                                        SELECT table_name, table_rows
+                                        FROM information_schema.tables
+                                        WHERE table_schema = %s
+                                        AND table_name IN ({placeholders})
+                                    """, (schema_name, *unique_source_tables))
 
-                        async with self.source_update_lock:
-                            table_info.source_last_updated = current_time
-                            table_info.source_updating = False
-                            table_info.source_is_estimated = True  # 标记为估计值
+                                    # 建立表名到行数的映射
+                                    source_rows_map = {}
+                                    rows = await cursor.fetchall()
+                                    for row in rows:
+                                        table_name, table_rows = row[0], row[1]
+                                        source_rows_map[table_name] = max(0, table_rows or 0)
+
+                                    # 更新每个目标表的源行数
+                                    for target_table_name, table_info in tables_dict.items():
+                                        if self.stop_event.is_set():
+                                            async with self.source_update_lock:
+                                                table_info.source_updating = False
+                                            return False
+
+                                        total_source_rows = 0
+                                        for source_table_name in table_source_map[target_table_name]:
+                                            if source_table_name in source_rows_map:
+                                                total_source_rows += source_rows_map[source_table_name]
+                                            else:
+                                                # 表不存在或查询失败，尝试精确查询
+                                                try:
+                                                    async with source_conn.cursor() as cursor2:
+                                                        await cursor2.execute(f"SELECT COUNT(*) FROM `{schema_name}`.`{source_table_name}`")
+                                                        result = await cursor2.fetchone()
+                                                        if result:
+                                                            total_source_rows += result[0]
+                                                except:
+                                                    continue
+
+                                        async with self.source_update_lock:
+                                            table_info.source_rows = total_source_rows
+                                            table_info.source_last_updated = current_time
+                                            table_info.source_updating = False
+                                            table_info.source_is_estimated = True
+
+                            except Exception as e:
+                                # 批量查询失败，回退到逐个查询
+                                for target_table_name, table_info in tables_dict.items():
+                                    if self.stop_event.is_set():
+                                        async with self.source_update_lock:
+                                            table_info.source_updating = False
+                                        return False
+
+                                    total_source_rows = 0
+                                    for source_table_name in table_info.source_tables:
+                                        try:
+                                            async with source_conn.cursor() as cursor:
+                                                await cursor.execute("""
+                                                    SELECT table_rows
+                                                    FROM information_schema.tables
+                                                    WHERE table_schema = %s
+                                                    AND table_name = %s
+                                                """, (schema_name, source_table_name))
+                                                result = await cursor.fetchone()
+                                                if result and result[0]:
+                                                    total_source_rows += result[0]
+                                        except:
+                                            continue
+
+                                    async with self.source_update_lock:
+                                        table_info.source_rows = total_source_rows
+                                        table_info.source_last_updated = current_time
+                                        table_info.source_updating = False
+                                        table_info.source_is_estimated = True
                 else:
                     # 常规更新使用精确的COUNT查询
                     # 首先标记所有表为更新中状态
@@ -1195,23 +1381,59 @@ class MonitorApp(App[None]):
                                     ti.source_updating = False
                             return False
 
-                        # 更新源记录数（汇总所有源表的精确记录数）
+                        # 更新源记录数（使用批量查询优化）
                         temp_source_rows = 0
-                        for source_table_name in table_info.source_tables:
-                            if self.stop_event.is_set():
-                                async with self.source_update_lock:
-                                    for ti in tables_dict.values():
-                                        ti.source_updating = False
-                                return False
+
+                        if table_info.source_tables:
+                            # 构建批量查询SQL
+                            source_tables = [f"'{table}'" for table in table_info.source_tables]
+                            tables_str = ",".join(source_tables)
 
                             try:
                                 async with source_conn.cursor() as cursor:
-                                    await cursor.execute(f"SELECT COUNT(*) FROM `{schema_name}`.`{source_table_name}`")
-                                    result = await cursor.fetchone()
-                                    if result:
-                                        temp_source_rows += result[0]
+                                    # 使用UNION ALL批量查询所有源表
+                                    if len(table_info.source_tables) == 1:
+                                        # 单个源表直接查询
+                                        await cursor.execute(
+                                            f"SELECT COUNT(*) FROM `{schema_name}`.`{table_info.source_tables[0]}`"
+                                        )
+                                        result = await cursor.fetchone()
+                                        if result:
+                                            temp_source_rows = result[0]
+                                    else:
+                                        # 多个源表使用批量查询
+                                        union_queries = []
+                                        for source_table in table_info.source_tables:
+                                            union_queries.append(
+                                                f"SELECT COUNT(*) as cnt FROM `{schema_name}`.`{source_table}`"
+                                            )
+
+                                        batch_sql = " UNION ALL ".join(union_queries)
+                                        await cursor.execute(batch_sql)
+
+                                        # 汇总所有结果
+                                        results = await cursor.fetchall()
+                                        temp_source_rows = sum(row[0] for row in results)
+
                             except Exception as e:
-                                continue
+                                # 批量查询失败，回退到逐个查询
+                                self.log(f"批量查询失败，回退到逐个查询: {e}")
+                                temp_source_rows = 0
+                                for source_table_name in table_info.source_tables:
+                                    if self.stop_event.is_set():
+                                        async with self.source_update_lock:
+                                            for ti in tables_dict.values():
+                                                ti.source_updating = False
+                                        return False
+
+                                    try:
+                                        async with source_conn.cursor() as cursor:
+                                            await cursor.execute(f"SELECT COUNT(*) FROM `{schema_name}`.`{source_table_name}`")
+                                            result = await cursor.fetchone()
+                                            if result:
+                                                temp_source_rows += result[0]
+                                    except Exception as e2:
+                                        continue
 
                         # 查询完成后更新结果
                         async with self.source_update_lock:
@@ -1219,7 +1441,7 @@ class MonitorApp(App[None]):
                             table_info.source_last_updated = current_time
                             table_info.source_updating = False
                             table_info.source_is_estimated = False  # 标记为精确值
-                            self.log(f"源表 {table_info.target_table_name} 更新完成，行数: {temp_source_rows}")
+                            self.log(f"源表 {table_info.target_table_name} 更新完成，源表数量: {len(table_info.source_tables)}, 总记录数: {temp_source_rows}")
 
                             # 检查数据是否一致，如果一致则暂停自动刷新
                             if table_info.is_consistent:
