@@ -423,6 +423,9 @@ class MonitorApp(App[None]):
         self.sort_by = "schema_table"  # 可选: schema_table, data_diff, target_rows, source_rows
         self.filter_mode = "all"  # 可选: all, inconsistent, consistent, error
 
+        # 用于增量更新的数据缓存
+        self._last_tables_hash = None
+
         # 信号处理
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
@@ -549,19 +552,25 @@ class MonitorApp(App[None]):
             return sorted(tables, key=lambda t: (t.schema_name, t.target_table_name))
 
     def _update_data_table(self):
-        """更新数据表格"""
+        """更新数据表格 - 使用优化的重建策略避免滚动位置丢失"""
         table = self.query_one("#tables", DataTable)
 
         # 先过滤再排序
         filtered_tables = self._filter_tables(self.tables)
         sorted_tables = self._sort_tables(filtered_tables)
 
-        # 保存当前光标位置和滚动位置
-        current_cursor = table.cursor_coordinate if table.row_count > 0 else None
+        # 检查是否有实际变化，如果没有则跳过更新
+        current_hash = self._get_tables_hash(sorted_tables)
+        if hasattr(self, '_last_tables_hash') and self._last_tables_hash == current_hash:
+            return  # 数据没有变化，跳过更新
+
+        # 保存当前滚动位置
         current_scroll_y = table.scroll_y if hasattr(table, 'scroll_y') else 0
 
-        # 清空表格并重新填充
-        table.clear()
+        # 使用批量更新减少闪烁
+        with self.app.batch_update():
+            # 清空表格并重新填充
+            table.clear()
 
         for i, t in enumerate(sorted_tables, 1):
             # 状态图标
@@ -666,31 +675,24 @@ class MonitorApp(App[None]):
                 source_count_display
             )
 
-        # 尝试恢复光标位置和滚动位置
-        if current_cursor is not None and table.row_count > 0:
+        # 恢复滚动位置
+        if current_scroll_y > 0 and hasattr(table, 'scroll_y'):
             try:
-                # 恢复光标位置
-                new_row = min(current_cursor.row, table.row_count - 1)
-                table.move_cursor(row=new_row)
-
-                # 多种方式尝试恢复滚动位置
-                self.call_after_refresh(self._restore_scroll_position, table, current_scroll_y)
-
+                max_scroll = table.max_scroll_y if hasattr(table, 'max_scroll_y') else current_scroll_y
+                table.scroll_y = min(current_scroll_y, max_scroll)
             except Exception:
                 pass  # 如果恢复失败，保持默认位置
 
-    def _restore_scroll_position(self, table: DataTable, scroll_y: int):
-        """恢复滚动位置的辅助方法"""
-        try:
-            # 尝试多种方式恢复滚动位置
-            if hasattr(table, 'scroll_y'):
-                table.scroll_y = scroll_y
-            if hasattr(table, 'scroll_to'):
-                table.scroll_to(y=scroll_y, animate=False)
-            if hasattr(table, 'scroll_offset'):
-                table.scroll_offset = table.scroll_offset.replace(y=scroll_y)
-        except Exception:
-            pass  # 静默失败，不影响正常功能
+        # 保存当前哈希值
+        self._last_tables_hash = current_hash
+
+    def _get_tables_hash(self, tables: List[TableInfo]) -> str:
+        """获取表格数据的哈希值用于变化检测"""
+        import hashlib
+        data_str = ""
+        for t in tables:
+            data_str += f"{t.schema_name}:{t.target_table_name}:{t.target_rows}:{t.source_rows}:{t.data_diff}:{t.change}:{len(t.source_tables)}:"
+        return hashlib.md5(data_str.encode()).hexdigest()
 
     async def refresh_data(self):
         """定时刷新数据"""
@@ -1016,27 +1018,29 @@ class MonitorApp(App[None]):
                         last_updated=current_time
                     )
 
-                    # 反向映射逻辑：先尝试直接匹配，再使用转换规则
-                    source_table_name = None
+                    # 反向映射逻辑：收集所有映射到该目标表的源表
+                    # 清空源表列表，准备重新收集
+                    target_tables[target_table_name].source_tables = []
 
-                    # 1. 直接匹配：如果目标表名在源表中存在，直接使用
+                    # 1. 直接匹配：如果目标表名在源表中存在，添加为源表
                     if target_table_name in source_table_names:
-                        source_table_name = target_table_name
-                    else:
-                        # 2. 转换规则匹配：尝试将目标表名转换为可能的源表名
-                        # 这里需要实现反向映射逻辑，根据目标表名找到对应的源表名
-                        # 由于映射规则复杂，这里使用一个简单的方法：尝试所有可能的源表名转换
-                        for source_table in source_table_names:
-                            if self.sync_props.get_target_table_name(source_table) == target_table_name:
-                                source_table_name = source_table
-                                break
-
-                    # 如果找到了对应的源表名，添加到source_tables中
-                    if source_table_name:
-                        target_tables[target_table_name].source_tables.append(source_table_name)
-                    else:
-                        # 如果没有找到对应的源表，使用目标表名作为源表名（默认情况）
                         target_tables[target_table_name].source_tables.append(target_table_name)
+
+                    # 2. 转换规则匹配：收集所有映射到该目标表的源表
+                    for source_table in source_table_names:
+                        mapped_target = self.sync_props.get_target_table_name(source_table)
+                        if mapped_target == target_table_name:
+                            # 避免重复添加
+                            if source_table not in target_tables[target_table_name].source_tables:
+                                target_tables[target_table_name].source_tables.append(source_table)
+
+                    # 3. 如果没有找到任何源表，使用目标表名作为源表名（默认情况）
+                    if not target_tables[target_table_name].source_tables:
+                        target_tables[target_table_name].source_tables.append(target_table_name)
+
+                    # 调试日志：显示映射关系
+                    if len(target_tables[target_table_name].source_tables) > 1:
+                        self.log(f"表映射: {target_table_name} <- {target_tables[target_table_name].source_tables}")
 
                 if target_tables:
                     schema_tables[schema_name] = target_tables
