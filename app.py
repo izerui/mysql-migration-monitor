@@ -492,9 +492,16 @@ class MonitorApp(App[None]):
                     print(f"关闭连接时出错: {e}")
             self.first_target_update = False
 
-        self.source_iteration += 1
-        await self.update_source_counts(target_tables, use_information_schema=True)
-        self.first_source_update = False
+        # 首次获取源表估算值
+        source_conn = await self.connect_source(self.monitor_config['databases'][0])
+        if source_conn:
+            await self.get_source_rows_from_information_schema(source_conn, target_tables)
+            if source_conn is not None and hasattr(source_conn, 'closed') and not source_conn.closed:
+                try:
+                    await source_conn.close()
+                except Exception as e:
+                    print(f"关闭源连接时出错: {e}")
+            self.first_source_update = False
 
         # 转换为列表格式
         self.tables = []
@@ -1178,6 +1185,67 @@ class MonitorApp(App[None]):
 
         return schema_tables
 
+    async def get_source_rows_from_information_schema(self, conn, target_tables: Dict[str, Dict[str, TableInfo]]):
+        """第一次运行时使用information_schema快速获取源MySQL表行数估计值"""
+        current_time = datetime.now()
+
+        try:
+            for schema_name, tables_dict in target_tables.items():
+                try:
+                    # 检查连接是否有效
+                    if conn is None or not hasattr(conn, 'closed') or conn.closed:
+                        return
+
+                    # 收集所有需要查询的源表
+                    all_source_tables = set()
+                    for table_info in tables_dict.values():
+                        all_source_tables.update(table_info.source_tables)
+
+                    if not all_source_tables:
+                        continue
+
+                    # 一次性获取所有源表的统计信息
+                    async with conn.cursor() as cursor:
+                        placeholders = ','.join(['%s'] * len(all_source_tables))
+                        await cursor.execute(f"""
+                            SELECT table_name, table_rows
+                            FROM information_schema.tables
+                            WHERE table_schema = %s
+                            AND table_name IN ({placeholders})
+                        """, (schema_name, *all_source_tables))
+
+                        # 建立表名到估计行数的映射
+                        source_stats_map = {}
+                        rows = await cursor.fetchall()
+                        for row in rows:
+                            table_name, table_rows = row[0], row[1]
+                            source_stats_map[table_name] = max(0, table_rows or 0)
+
+                    # 更新每个目标表的源行数（估算值）
+                    for target_table_name, table_info in tables_dict.items():
+                        total_source_rows = 0
+                        for source_table_name in table_info.source_tables:
+                            if source_table_name in source_stats_map:
+                                total_source_rows += source_stats_map[source_table_name]
+
+                        if not table_info.is_first_query:
+                            table_info.previous_source_rows = table_info.source_rows
+                        else:
+                            table_info.previous_source_rows = total_source_rows
+                            table_info.is_first_query = False
+
+                        table_info.source_rows = total_source_rows
+                        table_info.source_last_updated = current_time
+                        table_info.source_is_estimated = True  # 首次使用估算值
+                        # 首次估算值不暂停自动刷新，等待精确值
+
+                except Exception as e:
+                    # 如果information_schema查询失败，回退到逐表精确查询
+                    if conn is not None and hasattr(conn, 'closed') and not conn.closed:
+                        await self.update_source_counts(conn, {schema_name: tables_dict}, use_information_schema=True)
+        except Exception as e:
+            print(f"get_source_rows_from_information_schema 异常: {e}")
+
     async def get_target_rows_from_information_schema(self, conn, target_tables: Dict[str, Dict[str, TableInfo]]):
         """第一次运行时使用information_schema快速获取目标MySQL表行数估计值"""
         current_time = datetime.now()
@@ -1231,7 +1299,7 @@ class MonitorApp(App[None]):
 
                         table_info.target_rows = new_count
                         table_info.target_last_updated = current_time
-                        table_info.target_is_estimated = True  # 首次使用估算值
+                        table_info.target_is_estimated = True  # 仅当使用information_schema.tables.table_rows时为估算值
 
                 except Exception as e:
                     # 如果information_schema查询失败，回退到逐表精确查询
@@ -1332,7 +1400,7 @@ class MonitorApp(App[None]):
                                             table_info.source_rows = total_source_rows
                                             table_info.source_last_updated = current_time
                                             table_info.source_updating = False
-                                            table_info.source_is_estimated = True  # 首次使用估算值
+                                            table_info.source_is_estimated = True  # 仅当使用information_schema.tables.table_rows时为估算值
 
                             except Exception as e:
                                 # 批量查询失败，回退到逐个查询
@@ -1362,7 +1430,8 @@ class MonitorApp(App[None]):
                                         table_info.source_rows = total_source_rows
                                         table_info.source_last_updated = current_time
                                         table_info.source_updating = False
-                                        table_info.source_is_estimated = True  # 首次使用估算值
+                                        table_info.source_is_estimated = True  # 仅当使用information_schema.tables.table_rows时为估算值
+                                        # 估算值不暂停自动刷新，等待精确值
                 else:
                     # 常规更新使用精确的COUNT查询
                     # 首先标记所有表为更新中状态
@@ -1595,11 +1664,9 @@ class MonitorApp(App[None]):
 
                         table_info.target_rows = new_count
                         table_info.target_last_updated = current_time
-                        table_info.target_is_estimated = False  # 后续更新使用精确值
-
-                        # 检查数据是否一致，如果一致则暂停自动刷新
-                        if table_info.is_consistent:
-                            table_info.pause_auto_refresh = True
+                        table_info.target_is_estimated = False
+                        # 首次估算值不暂停自动刷新，等待精确值
+                        # 首次估算值不暂停自动刷新，等待精确值
 
                     except Exception as e:
                         # 出现异常时标记为错误状态，记录数设为-1表示错误
