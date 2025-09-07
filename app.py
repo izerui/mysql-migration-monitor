@@ -1299,7 +1299,10 @@ class MonitorApp(App[None]):
 
                         table_info.target_rows = new_count
                         table_info.target_last_updated = current_time
-                        table_info.target_is_estimated = True  # 仅当使用information_schema.tables.table_rows时为估算值
+                        table_info.target_is_estimated = True  # information_schema.tables.table_rows 估算值
+                        table_info.target_updating = False  # 重置更新状态
+                        table_info.target_updating = False  # 重置更新状态
+                        table_info.target_updating = False  # 重置更新状态
 
                 except Exception as e:
                     # 如果information_schema查询失败，回退到逐表精确查询
@@ -1679,6 +1682,8 @@ class MonitorApp(App[None]):
                         table_info.target_rows = -1  # -1表示查询失败
                         table_info.target_last_updated = current_time
                         table_info.target_is_estimated = False  # 错误状态不是估计值
+                        table_info.target_updating = False  # 重置更新状态
+                        table_info.target_updating = False  # 重置更新状态
         finally:
             self.target_updating = False
 
