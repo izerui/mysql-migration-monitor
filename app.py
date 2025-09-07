@@ -1427,8 +1427,8 @@ class MonitorApp(App[None]):
                             table_info.source_is_estimated = False  # 标记为精确值
                             self.log(f"源表 {table_info.target_table_name} 更新完成，源表数量: {len(table_info.source_tables)}, 总记录数: {temp_source_rows}")
 
-                            # 检查数据是否一致，如果一致则暂停自动刷新
-                            if table_info.is_consistent:
+                            # 双方都必须是精确值才能判断数据一致性
+                            if table_info.is_consistent and not table_info.source_is_estimated and not table_info.target_is_estimated:
                                 table_info.pause_auto_refresh = True
                                 self.log(f"表 {table_info.target_table_name} 数据一致，暂停自动刷新")
 
@@ -1616,8 +1616,8 @@ class MonitorApp(App[None]):
                                 table_info.target_is_estimated = False  # 标记为精确值
                                 self.log(f"目标表 {table_info.target_table_name} 更新完成，行数: {new_count}")
 
-                                # 检查数据是否一致，如果一致则暂停自动刷新
-                                if table_info.is_consistent:
+                                # 双方都必须是精确值才能判断数据一致性
+                                if table_info.is_consistent and not table_info.target_is_estimated and not table_info.source_is_estimated:
                                     table_info.pause_auto_refresh = True
                                     self.log(f"表 {table_info.target_table_name} 数据一致，暂停自动刷新")
 
