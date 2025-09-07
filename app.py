@@ -63,10 +63,7 @@ class TableInfo:
     source_is_estimated: bool = False
     pause_auto_refresh: bool = False  # 是否暂停自动刷新
 
-    @property
-    def change(self) -> int:
-        """目标记录数变化"""
-        return 0 if self.is_first_query else self.target_rows - self.previous_target_rows
+
 
     @property
     def data_diff(self) -> int:
@@ -197,8 +194,6 @@ class StatsWidget(Static):
         total_target_rows = sum(t.target_rows for t in valid_tables)
         total_source_rows = sum(t.source_rows for t in valid_tables)
         total_diff = total_target_rows - total_source_rows
-        total_changes = sum(t.change for t in valid_tables)
-        changed_count = len([t for t in valid_tables if t.change != 0])
 
         # 一致性统计
         consistent_count = len([t for t in tables if t.is_consistent])
@@ -253,15 +248,7 @@ class StatsWidget(Static):
             text.append(f"数据差异: {total_diff:+,} 行", style="white")
         text.append("\n")
 
-        # 变化和一致性统计
-        if total_changes > 0:
-            text.append(f"🔄 本轮变化: +{total_changes:,} 行", style="bold green")
-        elif total_changes < 0:
-            text.append(f"🔄 本轮变化: {total_changes:+,} 行", style="bold red")
-        else:
-            text.append(f"🔄 本轮变化: {total_changes:+,} 行", style="white")
-
-        text.append(f" ({changed_count} 个表有变化), ", style="white")
+        # 一致性统计
         text.append(f"一致性: {consistent_count} 个一致", style="bold green")
 
         if inconsistent_count > 0:
@@ -303,16 +290,7 @@ class StatsWidget(Static):
                 remaining = total_source_rows - total_target_rows
                 text.append(f" - 剩余: {remaining:,} 行", style="dim")
 
-                # 计算同步速度和预估时间
-                if hasattr(self, 'parent_app') and self.parent_app:
-                    speed = self.parent_app.calculate_sync_speed()
-                    if speed > 0:
-                        text.append(f" - 速度: {speed:.1f} 行/秒", style="bright_blue")
-                        estimated_time = self.parent_app.estimate_remaining_time(total_source_rows, total_target_rows,
-                                                                                 speed)
-                        text.append(f" - 预估: {estimated_time}", style="bright_blue")
-                    else:
-                        text.append(" - 速度: 计算中...", style="dim")
+
 
         self.update(text)
 
@@ -453,7 +431,7 @@ class MonitorApp(App[None]):
         table = self.query_one("#tables", DataTable)
         table.add_columns(
             "序号", "SCHEMA", "目标表名", "状态", "目标行数",
-            "源汇总数", "数据差异", "变化量", "目标更新", "源更新", "源表数量"
+            "源汇总数", "数据差异", "目标更新", "源更新", "源表数量"
         )
 
         # 启动监控任务
@@ -600,15 +578,7 @@ class MonitorApp(App[None]):
                     else:
                         diff_text = "[dim white]0[/]"
 
-                # 变化量文本和样式
-                if t.target_rows == -1:
-                    change_text = "[bold bright_red]ERROR[/]"
-                elif t.change > 0:
-                    change_text = f"[bold spring_green3]+{t.change:,} ⬆[/]"
-                elif t.change < 0:
-                    change_text = f"[bold orange3]{t.change:,} ⬇[/]"
-                else:
-                    change_text = "[dim white]0[/]"
+
 
                 # 目标更新时间样式
                 if t.target_updating:
@@ -677,7 +647,6 @@ class MonitorApp(App[None]):
                     target_rows_display,
                     source_rows_display,
                     diff_text,
-                    change_text,
                     target_time_display,
                     source_time_display,
                     source_count_display
@@ -699,7 +668,7 @@ class MonitorApp(App[None]):
         import hashlib
         data_str = ""
         for t in tables:
-            data_str += f"{t.schema_name}:{t.target_table_name}:{t.target_rows}:{t.source_rows}:{t.data_diff}:{t.change}:{len(t.source_tables)}:"
+            data_str += f"{t.schema_name}:{t.target_table_name}:{t.target_rows}:{t.source_rows}:{t.data_diff}:{len(t.source_tables)}:"
         return hashlib.md5(data_str.encode()).hexdigest()
 
 
@@ -738,15 +707,7 @@ class MonitorApp(App[None]):
                     else:
                         diff_text = "[dim white]0[/]"
 
-                # 变化量文本和样式
-                if t.target_rows == -1:
-                    change_text = "[bold bright_red]ERROR[/]"
-                elif t.change > 0:
-                    change_text = f"[bold spring_green3]+{t.change:,} ⬆[/]"
-                elif t.change < 0:
-                    change_text = f"[bold orange3]{t.change:,} ⬇[/]"
-                else:
-                    change_text = "[dim white]0[/]"
+
 
                 # 目标更新时间样式
                 if t.target_updating:
@@ -809,13 +770,12 @@ class MonitorApp(App[None]):
                 # 添加行到表格
                 table.add_row(
                     str(i),
-                    icon,
                     schema_display,
                     table_display,
+                    icon,
                     target_rows_display,
                     source_rows_display,
                     diff_text,
-                    change_text,
                     target_time_display,
                     source_time_display,
                     source_count_display
@@ -940,7 +900,7 @@ class MonitorApp(App[None]):
             return f"{years}年前"
 
     def update_progress_data(self, tables: List[TableInfo]):
-        """更新进度数据，计算总数和变化量"""
+        """更新进度数据，计算总数"""
         current_time = datetime.now()
 
         # 过滤掉错误状态的表进行统计
@@ -948,62 +908,17 @@ class MonitorApp(App[None]):
 
         total_target_rows = sum(t.target_rows for t in valid_tables)
         total_source_rows = sum(t.source_rows for t in valid_tables)
-        total_target_change = sum(t.change for t in valid_tables)
 
         # 添加到历史数据
-        self.history_data.append((current_time, total_target_rows, total_source_rows, total_target_change))
+        self.history_data.append((current_time, total_target_rows, total_source_rows, 0))
 
         # 保持历史数据在指定范围内
         if len(self.history_data) > self.max_history_points:
             self.history_data.pop(0)
 
-    def calculate_sync_speed(self) -> float:
-        """计算同步速度（记录/秒）"""
-        if len(self.history_data) < 2:
-            return 0.0
 
-        # 使用最近的数据点计算速度
-        recent_data = self.history_data[-min(10, len(self.history_data)):]
 
-        if len(recent_data) < 2:
-            return 0.0
 
-        # 计算时间跨度和总变化量
-        time_span = (recent_data[-1][0] - recent_data[0][0]).total_seconds()
-        if time_span <= 0:
-            return 0.0
-
-        # 计算目标MySQL总变化量（所有数据点的变化量之和）
-        total_change = sum(data[3] for data in recent_data if data[3] > 0)  # 只计算正向变化
-
-        return total_change / time_span if time_span > 0 else 0.0
-
-    def estimate_remaining_time(self, source_total: int, target_total: int, speed: float) -> str:
-        """估算剩余同步时间"""
-        if speed <= 0 or source_total <= 0:
-            return "无法估算"
-
-        # 计算还需要同步的记录数
-        remaining_records = source_total - target_total
-        if remaining_records <= 0:
-            return "已完成"
-
-        remaining_seconds = remaining_records / speed
-
-        if remaining_seconds < 60:
-            return f"{int(remaining_seconds)}秒"
-        elif remaining_seconds < 3600:
-            minutes = int(remaining_seconds // 60)
-            seconds = int(remaining_seconds % 60)
-            return f"{minutes}分{seconds}秒"
-        elif remaining_seconds < 86400:
-            hours = int(remaining_seconds // 3600)
-            minutes = int((remaining_seconds % 3600) // 60)
-            return f"{hours}小时{minutes}分钟"
-        else:
-            days = int(remaining_seconds // 86400)
-            hours = int((remaining_seconds % 86400) // 3600)
-            return f"{days}天{hours}小时"
 
     async def load_config(self) -> bool:
         """加载配置文件"""
