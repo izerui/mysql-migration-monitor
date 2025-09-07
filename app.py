@@ -1231,7 +1231,7 @@ class MonitorApp(App[None]):
 
                         table_info.target_rows = new_count
                         table_info.target_last_updated = current_time
-                        table_info.target_is_estimated = True  # 标记为估计值
+                        table_info.target_is_estimated = True  # 首次使用估算值
 
                 except Exception as e:
                     # 如果information_schema查询失败，回退到逐表精确查询
@@ -1332,7 +1332,7 @@ class MonitorApp(App[None]):
                                             table_info.source_rows = total_source_rows
                                             table_info.source_last_updated = current_time
                                             table_info.source_updating = False
-                                            table_info.source_is_estimated = True
+                                            table_info.source_is_estimated = True  # 首次使用估算值
 
                             except Exception as e:
                                 # 批量查询失败，回退到逐个查询
@@ -1362,7 +1362,7 @@ class MonitorApp(App[None]):
                                         table_info.source_rows = total_source_rows
                                         table_info.source_last_updated = current_time
                                         table_info.source_updating = False
-                                        table_info.source_is_estimated = True
+                                        table_info.source_is_estimated = True  # 首次使用估算值
                 else:
                     # 常规更新使用精确的COUNT查询
                     # 首先标记所有表为更新中状态
@@ -1595,7 +1595,7 @@ class MonitorApp(App[None]):
 
                         table_info.target_rows = new_count
                         table_info.target_last_updated = current_time
-                        table_info.target_is_estimated = False  # 标记为精确值
+                        table_info.target_is_estimated = False  # 后续更新使用精确值
 
                         # 检查数据是否一致，如果一致则暂停自动刷新
                         if table_info.is_consistent:
