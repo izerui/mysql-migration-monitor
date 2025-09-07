@@ -1218,9 +1218,8 @@ class MonitorApp(App[None]):
                         table_info.target_updating = False  # 重置更新状态
 
                 except Exception as e:
-                    # 如果information_schema查询失败，回退到逐表精确查询
-                    if conn is not None and hasattr(conn, 'closed') and not conn.closed:
-                        await self._update_single_schema_target(schema_name, tables_dict, use_information_schema=True)
+                    # 估算获取失败就失败，不回退到精确查询
+                    pass  # 保持当前状态，让表格显示为错误状态
         except Exception as e:
             # 捕获方法级别的异常，防止连接对象被破坏
             print(f"get_target_rows_from_information_schema 异常: {e}")
@@ -1555,41 +1554,25 @@ class MonitorApp(App[None]):
                                         self.log(f"目标表 {table_info.target_table_name} 更新完成，行数: {new_count}")
 
                         except Exception as e:
-                            # 批量查询失败，回退到逐个查询
+                            # 估算获取失败就失败，不回退
                             for target_table_name, table_info in tables_dict.items():
                                 if self.stop_event.is_set():
                                     async with self.target_update_lock:
                                         table_info.target_updating = False
                                     return False
 
-                                try:
-                                    async with target_conn.cursor() as cursor:
-                                        await cursor.execute("""
-                                            SELECT TABLE_ROWS
-                                            FROM INFORMATION_SCHEMA.TABLES
-                                            WHERE TABLE_SCHEMA = %s
-                                            AND TABLE_NAME = %s
-                                        """, (schema_name, target_table_name))
-                                        result = await cursor.fetchone()
-                                        if result and result[0]:
-                                            new_count = result[0]
-                                        else:
-                                            new_count = 0
-
-                                except:
-                                    new_count = -1
-
+                                # 估算失败，设置为错误状态
                                 async with self.target_update_lock:
                                     if not table_info.is_first_query:
                                         table_info.previous_target_rows = table_info.target_rows
                                     else:
-                                        table_info.previous_target_rows = new_count
+                                        table_info.previous_target_rows = -1
                                         table_info.is_first_query = False
 
-                                    table_info.target_rows = new_count
+                                    table_info.target_rows = -1  # 标记为错误状态
                                     table_info.target_last_updated = current_time
                                     table_info.target_updating = False
-                                    table_info.target_is_estimated = True  # 标记为估算值
+                                    table_info.target_is_estimated = True  # 仍然是估算值，但失败了
                 else:
                     # 常规更新使用精确的COUNT查询
                     # 首先标记所有表为更新中状态
