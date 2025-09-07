@@ -1214,15 +1214,13 @@ class MonitorApp(App[None]):
 
                         table_info.target_rows = new_count
                         table_info.target_last_updated = current_time
-                        table_info.target_is_estimated = True  # information_schema.tables.table_rows 估算值
-                        table_info.target_updating = False  # 重置更新状态
-                        table_info.target_updating = False  # 重置更新状态
+                        table_info.target_is_estimated = True  # 首次使用估算值
                         table_info.target_updating = False  # 重置更新状态
 
                 except Exception as e:
                     # 如果information_schema查询失败，回退到逐表精确查询
                     if conn is not None and hasattr(conn, 'closed') and not conn.closed:
-                        await self.update_target_counts(conn, {schema_name: tables_dict})
+                        await self._update_single_schema_target(schema_name, tables_dict, use_information_schema=True)
         except Exception as e:
             # 捕获方法级别的异常，防止连接对象被破坏
             print(f"get_target_rows_from_information_schema 异常: {e}")
@@ -1474,7 +1472,8 @@ class MonitorApp(App[None]):
                     self._update_single_schema_source(schema_name, tables_dict, use_information_schema))
                 self.source_update_tasks.append(future)
 
-    async def _update_single_schema_target(self, schema_name: str, tables_dict: Dict[str, TableInfo]) -> bool:
+    async def _update_single_schema_target(self, schema_name: str, tables_dict: Dict[str, TableInfo],
+                                           use_information_schema: bool = False) -> bool:
         """更新单个schema的目标MySQL记录数（异步版本，支持中断）"""
         current_time = datetime.now()
 
@@ -1488,63 +1487,169 @@ class MonitorApp(App[None]):
                 return False
 
             try:
-                # 常规更新使用精确的COUNT查询
-                # 首先标记所有表为更新中状态
-                async with self.target_update_lock:
-                    for table_info in tables_dict.values():
-                        if not table_info.target_updating:
-                            table_info.target_updating = True
-                            self.log(f"目标表 {table_info.target_table_name} 开始更新")
-
-                # 立即更新显示以确保能看到"更新中"状态
-                self.call_from_thread(self.update_display)
-
-                # 然后逐个处理表
-                for target_table_name, table_info in tables_dict.items():
+                if use_information_schema:
                     # 检查停止标志
                     if self.stop_event.is_set():
-                        # 恢复所有表的状态
-                        async with self.target_update_lock:
-                            for ti in tables_dict.values():
-                                ti.target_updating = False
                         return False
 
-                    # 在锁外执行查询以避免长时间锁定
-                    try:
-                        # 直接获取目标表的记录数
-                        new_count = 0
-                        async with target_conn.cursor() as cursor:
-                            await cursor.execute(f"SELECT COUNT(*) FROM `{schema_name}`.`{target_table_name}`")
-                            result = await cursor.fetchone()
-                            if result:
-                                new_count = result[0]
+                    # 首先标记所有表为更新中状态
+                    async with self.target_update_lock:
+                        for table_info in tables_dict.values():
+                            if not table_info.target_updating:
+                                table_info.target_updating = True
+                                table_info.target_rows = 0  # 重置
+                                self.log(f"目标表 {table_info.target_table_name} 开始更新")
 
-                        # 查询完成后更新结果
-                        async with self.target_update_lock:
-                            if not table_info.is_first_query:
-                                table_info.previous_target_rows = table_info.target_rows
-                            else:
-                                table_info.previous_target_rows = new_count
-                                table_info.is_first_query = False
+                    # 立即更新显示以确保能看到"更新中"状态
+                    self.call_from_thread(self.update_display)
 
-                            table_info.target_rows = new_count
-                            table_info.target_last_updated = current_time
-                            table_info.target_updating = False
-                            table_info.target_is_estimated = False  # 标记为精确值
-                            self.log(f"目标表 {table_info.target_table_name} 更新完成，行数: {new_count}")
+                    # 使用批量查询获取所有目标表的估计行数
+                    if tables_dict:
+                        try:
+                            async with target_conn.cursor() as cursor:
+                                # 一次性获取该schema下所有表的统计信息
+                                await cursor.execute("""
+                                                     SELECT TABLE_NAME, TABLE_ROWS
+                                                     FROM INFORMATION_SCHEMA.TABLES
+                                                     WHERE TABLE_SCHEMA = %s
+                                                       AND TABLE_TYPE = 'BASE TABLE'
+                                                     """, (schema_name,))
 
-                    except Exception as e:
-                        # 出现异常时标记为错误状态
-                        async with self.target_update_lock:
-                            if not table_info.is_first_query:
-                                table_info.previous_target_rows = table_info.target_rows
-                            else:
-                                table_info.previous_target_rows = -1
-                                table_info.is_first_query = False
+                                # 建立表名到估计行数的映射
+                                target_stats_map = {}
+                                rows = await cursor.fetchall()
+                                for row in rows:
+                                    table_name, table_rows = row[0], row[1]
+                                    target_stats_map[table_name] = max(0, table_rows or 0)
 
-                            table_info.target_rows = -1  # -1表示查询失败
-                            table_info.target_last_updated = current_time
-                            table_info.target_is_estimated = False  # 错误状态不是估计值
+                                # 更新每个目标表的行数
+                                for target_table_name, table_info in tables_dict.items():
+                                    if self.stop_event.is_set():
+                                        async with self.target_update_lock:
+                                            table_info.target_updating = False
+                                        return False
+
+                                    if target_table_name in target_stats_map:
+                                        new_count = target_stats_map[target_table_name]
+                                    else:
+                                        # 如果统计信息中没有，可能是新表或无数据，使用精确查询
+                                        try:
+                                            async with target_conn.cursor() as cursor2:
+                                                await cursor2.execute(f"SELECT COUNT(*) FROM `{schema_name}`.`{target_table_name}`")
+                                                result = await cursor2.fetchone()
+                                                new_count = result[0] if result else 0
+                                        except:
+                                            new_count = -1
+
+                                    async with self.target_update_lock:
+                                        if not table_info.is_first_query:
+                                            table_info.previous_target_rows = table_info.target_rows
+                                        else:
+                                            table_info.previous_target_rows = new_count
+                                            table_info.is_first_query = False
+
+                                        table_info.target_rows = new_count
+                                        table_info.target_last_updated = current_time
+                                        table_info.target_updating = False
+                                        table_info.target_is_estimated = True  # 标记为估算值
+                                        self.log(f"目标表 {table_info.target_table_name} 更新完成，行数: {new_count}")
+
+                        except Exception as e:
+                            # 批量查询失败，回退到逐个查询
+                            for target_table_name, table_info in tables_dict.items():
+                                if self.stop_event.is_set():
+                                    async with self.target_update_lock:
+                                        table_info.target_updating = False
+                                    return False
+
+                                try:
+                                    async with target_conn.cursor() as cursor:
+                                        await cursor.execute("""
+                                            SELECT TABLE_ROWS
+                                            FROM INFORMATION_SCHEMA.TABLES
+                                            WHERE TABLE_SCHEMA = %s
+                                            AND TABLE_NAME = %s
+                                        """, (schema_name, target_table_name))
+                                        result = await cursor.fetchone()
+                                        if result and result[0]:
+                                            new_count = result[0]
+                                        else:
+                                            new_count = 0
+
+                                except:
+                                    new_count = -1
+
+                                async with self.target_update_lock:
+                                    if not table_info.is_first_query:
+                                        table_info.previous_target_rows = table_info.target_rows
+                                    else:
+                                        table_info.previous_target_rows = new_count
+                                        table_info.is_first_query = False
+
+                                    table_info.target_rows = new_count
+                                    table_info.target_last_updated = current_time
+                                    table_info.target_updating = False
+                                    table_info.target_is_estimated = True  # 标记为估算值
+                else:
+                    # 常规更新使用精确的COUNT查询
+                    # 首先标记所有表为更新中状态
+                    async with self.target_update_lock:
+                        for table_info in tables_dict.values():
+                            if not table_info.target_updating:
+                                table_info.target_updating = True
+                                self.log(f"目标表 {table_info.target_table_name} 开始更新")
+
+                    # 然后逐个处理表
+                    for target_table_name, table_info in tables_dict.items():
+                        # 检查停止标志
+                        if self.stop_event.is_set():
+                            # 恢复所有表的状态
+                            async with self.target_update_lock:
+                                for ti in tables_dict.values():
+                                    ti.target_updating = False
+                            return False
+
+                        # 在锁外执行查询以避免长时间锁定
+                        try:
+                            # 直接获取目标表的记录数
+                            new_count = 0
+                            async with target_conn.cursor() as cursor:
+                                await cursor.execute(f"SELECT COUNT(*) FROM `{schema_name}`.`{target_table_name}`")
+                                result = await cursor.fetchone()
+                                if result:
+                                    new_count = result[0]
+
+                            # 查询完成后更新结果
+                            async with self.target_update_lock:
+                                if not table_info.is_first_query:
+                                    table_info.previous_target_rows = table_info.target_rows
+                                else:
+                                    table_info.previous_target_rows = new_count
+                                    table_info.is_first_query = False
+
+                                table_info.target_rows = new_count
+                                table_info.target_last_updated = current_time
+                                table_info.target_updating = False
+                                table_info.target_is_estimated = False  # 标记为精确值
+                                self.log(f"目标表 {table_info.target_table_name} 更新完成，行数: {new_count}")
+
+                                # 检查数据是否一致，如果一致则暂停自动刷新
+                                if table_info.is_consistent:
+                                    table_info.pause_auto_refresh = True
+                                    self.log(f"表 {table_info.target_table_name} 数据一致，暂停自动刷新")
+
+                        except Exception as e:
+                            # 出现异常时标记为错误状态
+                            async with self.target_update_lock:
+                                if not table_info.is_first_query:
+                                    table_info.previous_target_rows = table_info.target_rows
+                                else:
+                                    table_info.previous_target_rows = -1
+                                    table_info.is_first_query = False
+
+                                table_info.target_rows = -1  # -1表示查询失败
+                                table_info.target_last_updated = current_time
+                                table_info.target_is_estimated = False  # 错误状态不是估计值
 
                 return True
             finally:
@@ -1560,47 +1665,8 @@ class MonitorApp(App[None]):
 
     async def update_target_counts(self, conn, target_tables: Dict[str, Dict[str, TableInfo]]):
         """更新目标MySQL记录数（同步版本，用于兼容性）"""
-        current_time = datetime.now()
-        self.target_updating = True
-        try:
-            for schema_name, tables_dict in target_tables.items():
-                for target_table_name, table_info in tables_dict.items():
-                    try:
-                        # 直接获取目标表的记录数
-                        new_count = 0
-                        async with conn.cursor() as cursor:
-                            await cursor.execute(f"SELECT COUNT(*) FROM `{schema_name}`.`{target_table_name}`")
-                            result = await cursor.fetchone()
-                            if result:
-                                new_count = result[0]
-
-                        if not table_info.is_first_query:
-                            table_info.previous_target_rows = table_info.target_rows
-                        else:
-                            table_info.previous_target_rows = new_count
-                            table_info.is_first_query = False
-
-                        table_info.target_rows = new_count
-                        table_info.target_last_updated = current_time
-                        table_info.target_is_estimated = False
-                        # 首次估算值不暂停自动刷新，等待精确值
-                        # 首次估算值不暂停自动刷新，等待精确值
-
-                    except Exception as e:
-                        # 出现异常时标记为错误状态，记录数设为-1表示错误
-                        if not table_info.is_first_query:
-                            table_info.previous_target_rows = table_info.target_rows
-                        else:
-                            table_info.previous_target_rows = -1
-                            table_info.is_first_query = False
-
-                        table_info.target_rows = -1  # -1表示查询失败
-                        table_info.target_last_updated = current_time
-                        table_info.target_is_estimated = False  # 错误状态不是估计值
-                        table_info.target_updating = False  # 重置更新状态
-                        table_info.target_updating = False  # 重置更新状态
-        finally:
-            self.target_updating = False
+        for schema_name, tables_dict in target_tables.items():
+            await self._update_single_schema_target(schema_name, tables_dict, use_information_schema=False)
 
     async def update_target_counts_async(self, target_tables: Dict[str, Dict[str, TableInfo]]):
         """异步更新目标MySQL记录数（不阻塞主线程）"""
@@ -1619,7 +1685,7 @@ class MonitorApp(App[None]):
 
             if not schema_updating:
                 future = asyncio.create_task(
-                    self._update_single_schema_target(schema_name, tables_dict))
+                    self._update_single_schema_target(schema_name, tables_dict, use_information_schema=False))
                 self.target_update_tasks.append(future)
 
 
